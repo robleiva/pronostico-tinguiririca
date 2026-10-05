@@ -1,0 +1,44 @@
+name: Actualizacion Diaria Pronostico
+
+on:
+  schedule:
+    # Corre todos los días a las 08:30 UTC (~05:30 hora de Chile)
+    - cron: '30 8 * * *'
+  workflow_dispatch: # Permite ejecutarlo manualmente con un clic en GitHub
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Instalar librerías
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ejecutar corrida y generar HTML
+        run: |
+          python generar_pronostico.py
+
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v4
+
+      - name: Subir artefacto para Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: Desplegar en GitHub Pages
+        uses: actions/deploy-pages@v4
