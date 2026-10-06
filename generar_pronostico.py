@@ -37,13 +37,23 @@ FILE_HIST_FCST = os.path.join(HISTORICO_DIR, "pronosticos_wrf.csv")
 
 import time
 
+import time
+
 # ==============================================================================
-# 2. CONSULTA Y PERSISTENCIA DE AMBIENT WEATHER
+# 2. CONSULTA Y PERSISTENCIA DE AMBIENT WEATHER (CON AUTO-DETECCIÓN DE MAC)
 # ==============================================================================
 AMBIENT_API_KEY = os.environ.get("AMBIENT_API_KEY", "").strip()
 AMBIENT_APP_KEY = os.environ.get("AMBIENT_APPLICATION_KEY", "").strip()
-MAC_PORTILLO = os.environ.get("MAC_PORTILLO", "").strip()
-MAC_TINGUIRIRICA = os.environ.get("MAC_TINGUIRIRICA", "").strip()
+
+# MACs configuradas en Secrets (se limpian y formatean con dos puntos)
+def formatear_mac(mac_raw):
+    limpia = mac_raw.replace(":", "").replace("-", "").strip().lower()
+    if len(limpia) == 12:
+        return ":".join(limpia[i:i+2] for i in range(0, 12, 2))
+    return mac_raw.strip().lower()
+
+MAC_PORTILLO = formatear_mac(os.environ.get("MAC_PORTILLO", ""))
+MAC_TINGUIRIRICA = formatear_mac(os.environ.get("MAC_TINGUIRIRICA", ""))
 
 ESTACIONES_AMBIENT = {
     "BT Portillo": MAC_PORTILLO,
@@ -54,26 +64,15 @@ def obtener_datos_estacion(mac, nombre, limit=288):
     if not AMBIENT_API_KEY or not AMBIENT_APP_KEY or not mac:
         print(f"[Aviso] Faltan credenciales o MAC para {nombre}.")
         return pd.DataFrame()
-    
-    # Limpiar MAC para asegurar compatibilidad
-    mac_limpia = mac.replace(":", "").replace("-", "").strip().upper()
-    url = f"https://rt.ambientweather.net/v1/devices/{mac_limpia}"
+
+    url = f"https://rt.ambientweather.net/v1/devices/{mac}"
     params = {"apiKey": AMBIENT_API_KEY, "applicationKey": AMBIENT_APP_KEY, "limit": limit}
-    
+
     try:
-        # Pausa obligatoria para respetar el límite de 1 req/seg de Ambient Weather
+        # Pausa obligatoria para respetar el límite de 1 req/segundo
         time.sleep(2)
-        
         resp = requests.get(url, params=params, timeout=15)
-        print(f"[Ambient] Consulta a {nombre} ({mac_limpia}) -> Código {resp.status_code}")
-        
-        # Si devuelve 404, intentar con formato original con dos puntos
-        if resp.status_code == 404 and ":" not in mac:
-            mac_colons = ":".join(mac_limpia[i:i+2] for i in range(0, len(mac_limpia), 2))
-            url_alt = f"https://rt.ambientweather.net/v1/devices/{mac_colons}"
-            time.sleep(2)
-            resp = requests.get(url_alt, params=params, timeout=15)
-            print(f"[Ambient] Reintento con dos puntos {nombre} -> Código {resp.status_code}")
+        print(f"[Ambient] Consulta a {nombre} ({mac}) -> Código {resp.status_code}")
 
         if resp.status_code != 200:
             print(f"[Aviso] No fue posible obtener datos para {nombre}: {resp.status_code} - {resp.text}")
@@ -98,15 +97,41 @@ def obtener_datos_estacion(mac, nombre, limit=288):
                 "T2_Obs": tc,
                 "PP_Obs": pp_h
             })
-        
+
         df_obs = pd.DataFrame(registros).sort_values("Fecha_Validez").reset_index(drop=True)
         df_obs = df_obs.resample('1h', on='Fecha_Validez').agg({'Punto': 'first', 'T2_Obs': 'mean', 'PP_Obs': 'max'}).reset_index()
         df_obs['PP_Obs_acum'] = df_obs['PP_Obs'].cumsum()
-        print(f"[Ambient] Correcto: {len(df_obs)} registros para {nombre}.")
+        print(f"[Ambient] Correcto: {len(df_obs)} registros cargados para {nombre}.")
         return df_obs
     except Exception as e:
         print(f"[Error] Excepción descargando {nombre}: {e}")
         return pd.DataFrame()
+
+# Descubrimiento previo de dispositivos en tu cuenta de Ambient Weather
+def resolver_macs_desde_cuenta():
+    if not AMBIENT_API_KEY or not AMBIENT_APP_KEY:
+        return {}
+    url = "https://rt.ambientweather.net/v1/devices"
+    params = {"apiKey": AMBIENT_API_KEY, "applicationKey": AMBIENT_APP_KEY}
+    try:
+        time.sleep(1)
+        r = requests.get(url, params=params, timeout=15)
+        if r.status_code == 200:
+            devs = r.json()
+            print(f"[Ambient] Estaciones encontradas en la cuenta: {len(devs)}")
+            encontradas = {}
+            for d in devs:
+                mac_d = d.get("macAddress", "").strip().lower()
+                nombre_d = d.get("info", {}).get("name", "")
+                print(f"   -> Encontrada en cuenta: '{nombre_d}' con MAC: '{mac_d}'")
+                encontradas[mac_d] = nombre_d
+            return encontradas
+    except Exception as e:
+        print(f"[Ambient] Aviso al listar estaciones: {e}")
+    return {}
+
+# Mapear estaciones registradas
+estaciones_en_cuenta = resolver_macs_desde_cuenta()
 
 datos_observados = {}
 obs_acumuladas = []
