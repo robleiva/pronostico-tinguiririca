@@ -213,7 +213,7 @@ else:
 df_total_fcst.to_csv(FILE_HIST_FCST, index=False)
 
 # ==============================================================================
-# 4. MÓDULO DE VALIDACIÓN HISTÓRICA (HORA LOCAL CHILE)
+# 4. MÓDULO DE VALIDACIÓN HISTÓRICA (CRUCE EXACTO Y DESDUPLICADO)
 # ==============================================================================
 html_validacion = ""
 metricas_filas = []
@@ -230,8 +230,11 @@ if os.path.exists(FILE_HIST_OBS) and os.path.exists(FILE_HIST_FCST):
     df_h_obs['Fecha_Local'] = pd.to_datetime(df_h_obs['Fecha_Local'])
     df_h_fcst['Fecha_Local'] = pd.to_datetime(df_h_fcst['Fecha_Local'])
 
+    # Quedarse con un único pronóstico por cada hora (el más reciente de corto plazo <= 24h)
     df_fcst_24 = df_h_fcst[(df_h_fcst['Lead_Time'] >= 1) & (df_h_fcst['Lead_Time'] <= 24)]
-    df_cruce = pd.merge(df_fcst_24, df_h_obs, on=['Punto', 'Fecha_Local'], how='inner')
+    df_fcst_unicos = df_fcst_24.sort_values('Lead_Time').drop_duplicates(subset=['Punto', 'Fecha_Local'], keep='first')
+
+    df_cruce = pd.merge(df_fcst_unicos, df_h_obs, on=['Punto', 'Fecha_Local'], how='inner')
 
     for pto in ["BT Portillo", "BT Tinguiririca"]:
         sub = df_cruce[df_cruce['Punto'] == pto].copy()
