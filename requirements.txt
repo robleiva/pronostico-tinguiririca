@@ -6,3 +6,4 @@ s3fs
 cartopy
 pandas
 plotly
+requests
