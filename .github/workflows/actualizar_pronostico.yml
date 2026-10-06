@@ -2,6 +2,7 @@ name: Actualizacion Diaria Pronostico
 
 on:
   schedule:
+    # Corre todos los días a las 08:30 UTC (~05:30 hora de Chile)
     - cron: '30 8 * * *'
   workflow_dispatch:
 
@@ -28,6 +29,11 @@ jobs:
           pip install -r requirements.txt
 
       - name: Ejecutar corrida y generar HTML
+        env:
+          AMBIENT_API_KEY: ${{ secrets.AMBIENT_API_KEY }}
+          AMBIENT_APPLICATION_KEY: ${{ secrets.AMBIENT_APPLICATION_KEY }}
+          MAC_PORTILLO: ${{ secrets.MAC_PORTILLO }}
+          MAC_TINGUIRIRICA: ${{ secrets.MAC_TINGUIRIRICA }}
         run: |
           python generar_pronostico.py
 
