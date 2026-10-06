@@ -35,13 +35,13 @@ os.makedirs(HISTORICO_DIR, exist_ok=True)
 FILE_HIST_OBS = os.path.join(HISTORICO_DIR, "observaciones_ambient.csv")
 FILE_HIST_FCST = os.path.join(HISTORICO_DIR, "pronosticos_wrf.csv")
 
+import time
+
 # ==============================================================================
-# 2. CONSULTA Y PERSISTENCIA DE AMBIENT WEATHER (CON AUTO-DETECCIÓN Y DEBUG)
+# 2. CONSULTA Y PERSISTENCIA DE AMBIENT WEATHER
 # ==============================================================================
 AMBIENT_API_KEY = os.environ.get("AMBIENT_API_KEY", "").strip()
 AMBIENT_APP_KEY = os.environ.get("AMBIENT_APPLICATION_KEY", "").strip()
-
-# Formatear MACs eliminando espacios en blanco accidentales
 MAC_PORTILLO = os.environ.get("MAC_PORTILLO", "").strip()
 MAC_TINGUIRIRICA = os.environ.get("MAC_TINGUIRIRICA", "").strip()
 
@@ -50,56 +50,37 @@ ESTACIONES_AMBIENT = {
     "BT Tinguiririca": MAC_TINGUIRIRICA
 }
 
-def descubrir_dispositivos():
-    """Consulta la lista de estaciones registradas en la cuenta para validar MACs."""
-    if not AMBIENT_API_KEY or not AMBIENT_APP_KEY:
-        print("[Ambient] Falta AMBIENT_API_KEY o AMBIENT_APPLICATION_KEY en Secrets.")
-        return {}
-    url = "https://rt.ambientweather.net/v1/devices"
-    params = {"apiKey": AMBIENT_API_KEY, "applicationKey": AMBIENT_APP_KEY}
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        if r.status_code == 200:
-            devs = r.json()
-            print(f"[Ambient] Dispositivos encontrados en cuenta ({len(devs)}):")
-            mapa_devs = {}
-            for d in devs:
-                mac_d = d.get("macAddress", "")
-                nombre_d = d.get("info", {}).get("name", "Sin nombre")
-                print(f"  -> Nombre: '{nombre_d}' | MAC: '{mac_d}'")
-                mapa_devs[mac_d.lower()] = mac_d
-            return mapa_devs
-        else:
-            print(f"[Ambient] Error al listar dispositivos: {r.status_code} - {r.text}")
-    except Exception as e:
-        print(f"[Ambient] Excepción listando dispositivos: {e}")
-    return {}
-
 def obtener_datos_estacion(mac, nombre, limit=288):
-    if not mac:
-        print(f"[Aviso] No se proporcionó MAC para {nombre}.")
+    if not AMBIENT_API_KEY or not AMBIENT_APP_KEY or not mac:
+        print(f"[Aviso] Faltan credenciales o MAC para {nombre}.")
         return pd.DataFrame()
     
-    url = f"https://rt.ambientweather.net/v1/devices/{mac}"
+    # Limpiar MAC para asegurar compatibilidad
+    mac_limpia = mac.replace(":", "").replace("-", "").strip().upper()
+    url = f"https://rt.ambientweather.net/v1/devices/{mac_limpia}"
     params = {"apiKey": AMBIENT_API_KEY, "applicationKey": AMBIENT_APP_KEY, "limit": limit}
+    
     try:
-        resp = requests.get(url, params=params, timeout=15)
-        print(f"[Ambient] Petición a {nombre} ({mac}) -> Status {resp.status_code}")
+        # Pausa obligatoria para respetar el límite de 1 req/seg de Ambient Weather
+        time.sleep(2)
         
-        if resp.status_code != 200:
-            # Reintentar sin dos puntos si la MAC traía separadores
-            mac_alt = mac.replace(":", "") if ":" in mac else mac
-            if mac_alt != mac:
-                url_alt = f"https://rt.ambientweather.net/v1/devices/{mac_alt}"
-                resp = requests.get(url_alt, params=params, timeout=15)
-                print(f"[Ambient] Reintento alternativo para {nombre} ({mac_alt}) -> Status {resp.status_code}")
+        resp = requests.get(url, params=params, timeout=15)
+        print(f"[Ambient] Consulta a {nombre} ({mac_limpia}) -> Código {resp.status_code}")
+        
+        # Si devuelve 404, intentar con formato original con dos puntos
+        if resp.status_code == 404 and ":" not in mac:
+            mac_colons = ":".join(mac_limpia[i:i+2] for i in range(0, len(mac_limpia), 2))
+            url_alt = f"https://rt.ambientweather.net/v1/devices/{mac_colons}"
+            time.sleep(2)
+            resp = requests.get(url_alt, params=params, timeout=15)
+            print(f"[Ambient] Reintento con dos puntos {nombre} -> Código {resp.status_code}")
 
         if resp.status_code != 200:
-            print(f"[Aviso] No fue posible obtener datos para {nombre}: {resp.text}")
+            print(f"[Aviso] No fue posible obtener datos para {nombre}: {resp.status_code} - {resp.text}")
             return pd.DataFrame()
 
         data = resp.json()
-        if not data:
+        if not data or not isinstance(data, list):
             print(f"[Aviso] Respuesta vacía de Ambient Weather para {nombre}.")
             return pd.DataFrame()
 
@@ -117,17 +98,15 @@ def obtener_datos_estacion(mac, nombre, limit=288):
                 "T2_Obs": tc,
                 "PP_Obs": pp_h
             })
+        
         df_obs = pd.DataFrame(registros).sort_values("Fecha_Validez").reset_index(drop=True)
         df_obs = df_obs.resample('1h', on='Fecha_Validez').agg({'Punto': 'first', 'T2_Obs': 'mean', 'PP_Obs': 'max'}).reset_index()
         df_obs['PP_Obs_acum'] = df_obs['PP_Obs'].cumsum()
-        print(f"[Ambient] Éxito: {len(df_obs)} registros procesados para {nombre}.")
+        print(f"[Ambient] Correcto: {len(df_obs)} registros para {nombre}.")
         return df_obs
     except Exception as e:
-        print(f"[Error] Falló descarga de Ambient ({nombre}): {e}")
+        print(f"[Error] Excepción descargando {nombre}: {e}")
         return pd.DataFrame()
-
-# Descubrimiento previo de dispositivos en tu cuenta
-dispositivos_cuenta = descubrir_dispositivos()
 
 datos_observados = {}
 obs_acumuladas = []
