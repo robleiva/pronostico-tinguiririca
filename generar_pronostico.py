@@ -5,11 +5,12 @@ import s3fs
 import xarray as xr
 import cartopy.crs as ccrs
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # ==============================================================================
-# 1. PUNTOS DE LA CUENCA (COORDENADAS Y ELEVACIONES OFICIALES)
+# 1. PUNTOS DE LA CUENCA (COORDENADAS Y COTAS OFICIALES MSNM)
 # ==============================================================================
 PUNTOS = {
     "Termas del Flaco":   {"lat": -34.957319, "lon": -70.435943, "alt": 1746},
@@ -22,7 +23,6 @@ PUNTOS = {
     "Mi Casa":            {"lat": -34.679066, "lon": -70.999811, "alt": 357}
 }
 
-# Configuración API Ambient Weather
 AMBIENT_API_KEY = os.environ.get("AMBIENT_API_KEY", "")
 AMBIENT_APP_KEY = os.environ.get("AMBIENT_APPLICATION_KEY", "")
 ESTACIONES_AMBIENT = {
@@ -30,8 +30,13 @@ ESTACIONES_AMBIENT = {
     "BT Tinguiririca": os.environ.get("MAC_TINGUIRIRICA", "")
 }
 
+HISTORICO_DIR = "historico"
+os.makedirs(HISTORICO_DIR, exist_ok=True)
+FILE_HIST_OBS = os.path.join(HISTORICO_DIR, "observaciones_ambient.csv")
+FILE_HIST_FCST = os.path.join(HISTORICO_DIR, "pronosticos_wrf.csv")
+
 # ==============================================================================
-# 2. FUNCIÓN PARA CONSULTAR AMBIENT WEATHER
+# 2. CONSULTA Y PERSISTENCIA DE AMBIENT WEATHER
 # ==============================================================================
 def obtener_datos_estacion(mac, nombre, limit=288):
     if not AMBIENT_API_KEY or not AMBIENT_APP_KEY or not mac:
@@ -41,7 +46,7 @@ def obtener_datos_estacion(mac, nombre, limit=288):
     try:
         resp = requests.get(url, params=params, timeout=15)
         if resp.status_code != 200:
-            print(f"[Aviso] API Ambient Weather ({nombre}) respondió con código {resp.status_code}")
+            print(f"[Aviso] Ambient Weather ({nombre}) error: {resp.status_code}")
             return pd.DataFrame()
         data = resp.json()
         if not data:
@@ -56,25 +61,40 @@ def obtener_datos_estacion(mac, nombre, limit=288):
             pp_h = round(hourly_in * 25.4, 2) if hourly_in is not None else 0.0
 
             registros.append({
+                "Punto": nombre,
                 "Fecha_Validez": fecha_utc.tz_localize(None),
                 "T2_Obs": tc,
                 "PP_Obs": pp_h
             })
         df_obs = pd.DataFrame(registros).sort_values("Fecha_Validez").reset_index(drop=True)
-        # Resamplear u ordenar de forma horaria si las lecturas vienen cada 5 min
-        df_obs = df_obs.resample('1h', on='Fecha_Validez').agg({'T2_Obs': 'mean', 'PP_Obs': 'max'}).reset_index()
+        # Resampleo horario promediando temperatura y tomando el valor horario de lluvia
+        df_obs = df_obs.resample('1h', on='Fecha_Validez').agg({'Punto': 'first', 'T2_Obs': 'mean', 'PP_Obs': 'max'}).reset_index()
         df_obs['PP_Obs_acum'] = df_obs['PP_Obs'].cumsum()
         return df_obs
     except Exception as e:
-        print(f"[Error] Falló la descarga de Ambient Weather ({nombre}): {e}")
+        print(f"[Error] Falló descarga de Ambient ({nombre}): {e}")
         return pd.DataFrame()
 
-# Descargar observaciones de las estaciones disponibles
 datos_observados = {}
+obs_acumuladas = []
 for nom_est, mac_est in ESTACIONES_AMBIENT.items():
     if mac_est:
         print(f"Descargando observaciones de {nom_est}...")
-        datos_observados[nom_est] = obtener_datos_estacion(mac_est, nom_est)
+        df_est = obtener_datos_estacion(mac_est, nom_est)
+        if not df_est.empty:
+            datos_observados[nom_est] = df_est
+            obs_acumuladas.append(df_est[['Punto', 'Fecha_Validez', 'T2_Obs', 'PP_Obs']])
+
+# Actualizar archivo acumulado de observaciones
+if obs_acumuladas:
+    df_nuevas_obs = pd.concat(obs_acumuladas, ignore_index=True)
+    if os.path.exists(FILE_HIST_OBS):
+        df_prev_obs = pd.read_csv(FILE_HIST_OBS)
+        df_prev_obs['Fecha_Validez'] = pd.to_datetime(df_prev_obs['Fecha_Validez'])
+        df_total_obs = pd.concat([df_prev_obs, df_nuevas_obs]).drop_duplicates(subset=['Punto', 'Fecha_Validez'], keep='last')
+    else:
+        df_total_obs = df_nuevas_obs
+    df_total_obs.to_csv(FILE_HIST_OBS, index=False)
 
 # ==============================================================================
 # 3. EXTRACCIÓN DE PRONÓSTICO DE AWS S3 (WRF-SMN 72 HORAS)
@@ -116,13 +136,13 @@ for lead_time in range(1, 73):
                     pp_val = round(float(nodo["PP"].values), 2)
                     alt_real = PUNTOS[nom]["alt"]
 
-                    # Cálculo de la Isoterma Cero (gradientes 6.5 a 9.0 °C/1.000m)
                     iso_alta = round(alt_real + (t2_val / 6.5) * 1000, 1)
                     iso_baja = round(alt_real + (t2_val / 9.0) * 1000, 1)
                     iso_media = round((iso_alta + iso_baja) / 2, 1)
 
                     registros.append({
                         "Punto": nom,
+                        "Fecha_Corrida": fecha_corrida,
                         "Fecha_Validez": f_validez,
                         "Lead_Time": lead_time,
                         "Altitud_msnm": alt_real,
@@ -139,11 +159,107 @@ df = pd.DataFrame(registros)
 if df.empty:
     raise RuntimeError("No se descargaron datos de los archivos NetCDF.")
 
+# Actualizar archivo acumulado de pronósticos
+df_nuevo_fcst = df[['Punto', 'Fecha_Corrida', 'Fecha_Validez', 'Lead_Time', 'T2', 'PP']]
+if os.path.exists(FILE_HIST_FCST):
+    df_prev_fcst = pd.read_csv(FILE_HIST_FCST)
+    df_prev_fcst['Fecha_Validez'] = pd.to_datetime(df_prev_fcst['Fecha_Validez'])
+    df_prev_fcst['Fecha_Corrida'] = pd.to_datetime(df_prev_fcst['Fecha_Corrida'])
+    df_total_fcst = pd.concat([df_prev_fcst, df_nuevo_fcst]).drop_duplicates(subset=['Punto', 'Fecha_Corrida', 'Lead_Time'], keep='last')
+else:
+    df_total_fcst = df_nuevo_fcst
+df_total_fcst.to_csv(FILE_HIST_FCST, index=False)
+
 # ==============================================================================
-# 4. GENERACIÓN DE GRÁFICOS INTERACTIVOS (PLOTLY)
+# 4. MÓDULO DE VALIDACIÓN HISTÓRICA (WRF vs. AMBIENT WEATHER)
+# ==============================================================================
+html_validacion = ""
+metricas_filas = []
+
+if os.path.exists(FILE_HIST_OBS) and os.path.exists(FILE_HIST_FCST):
+    df_h_obs = pd.read_csv(FILE_HIST_OBS)
+    df_h_fcst = pd.read_csv(FILE_HIST_FCST)
+    df_h_obs['Fecha_Validez'] = pd.to_datetime(df_h_obs['Fecha_Validez'])
+    df_h_fcst['Fecha_Validez'] = pd.to_datetime(df_h_fcst['Fecha_Validez'])
+
+    # Cruzar datos por Punto y Fecha/Hora exacta
+    # Consideramos pronósticos de corto plazo (Lead_Time entre 1 y 24 horas para evaluar el pronóstico del día)
+    df_fcst_24 = df_h_fcst[(df_h_fcst['Lead_Time'] >= 1) & (df_h_fcst['Lead_Time'] <= 24)]
+    df_cruce = pd.merge(df_fcst_24, df_h_obs, on=['Punto', 'Fecha_Validez'], how='inner')
+
+    if not df_cruce.empty:
+        for pto in ["BT Portillo", "BT Tinguiririca"]:
+            sub = df_cruce[df_cruce['Punto'] == pto].dropna(subset=['T2', 'T2_Obs', 'PP', 'PP_Obs'])
+            if len(sub) >= 5:
+                # Métricas Temperatura
+                error_t = sub['T2'] - sub['T2_Obs']
+                mae_t = round(float(np.mean(np.abs(error_t))), 2)
+                bias_t = round(float(np.mean(error_t)), 2)
+
+                # Métricas Precipitación
+                error_pp = sub['PP'] - sub['PP_Obs']
+                mae_pp = round(float(np.mean(np.abs(error_pp))), 2)
+                bias_pp = round(float(np.mean(error_pp)), 2)
+                total_pp_fcst = round(float(sub['PP'].sum()), 1)
+                total_pp_obs = round(float(sub['PP_Obs'].sum()), 1)
+
+                metricas_filas.append({
+                    "Punto": pto,
+                    "Horas_Evaluadas": len(sub),
+                    "MAE_Temp": f"{mae_t} °C",
+                    "Sesgo_Temp": f"{bias_t:+0.2f} °C",
+                    "MAE_PP": f"{mae_pp} mm/h",
+                    "Sesgo_PP": f"{bias_pp:+0.2f} mm/h",
+                    "PP_Acum_WRF": f"{total_pp_fcst} mm",
+                    "PP_Acum_Real": f"{total_pp_obs} mm"
+                })
+
+        if metricas_filas:
+            df_metricas = pd.DataFrame(metricas_filas)
+            tabla_html = "<table style='width:100%; border-collapse:collapse; margin-top:15px; font-size:14px; text-align:center;'>"
+            tabla_html += "<tr style='background-color:#2b6cb0; color:white;'>"
+            for col in ["Estación", "Horas Muestreadas", "MAE Temp", "Sesgo Temp", "MAE Precipitación", "Sesgo Precipitación", "Lluvia Acum. WRF", "Lluvia Acum. Real"]:
+                tabla_html += f"<th style='padding:10px; border:1px solid #cbd5e0;'>{col}</th>"
+            tabla_html += "</tr>"
+
+            for _, row in df_metricas.iterrows():
+                tabla_html += f"<tr style='background-color:#ffffff;'>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0; font-weight:bold;'>{row['Punto']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['Horas_Evaluadas']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['MAE_Temp']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0; color:{'#c53030' if '+' in row['Sesgo_Temp'] else '#2b6cb0'}; font-weight:bold;'>{row['Sesgo_Temp']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['MAE_PP']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['Sesgo_PP']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['PP_Acum_WRF']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['PP_Acum_Real']}</td>"
+                tabla_html += "</tr>"
+            tabla_html += "</table>"
+
+            html_validacion = f"""
+            <div style='background:#f7fafc; padding:20px; border-radius:8px; border:1px solid #e2e8f0; margin-bottom:40px;'>
+                <p style='margin:0; font-size:14px; color:#4a5568;'>
+                    Métricas de validación basadas en el cruce de pronósticos (plazo 1-24h) contra los datos reales registrados por las estaciones Ambient Weather:
+                </p>
+                {tabla_html}
+                <p style='font-size:12px; color:#718096; margin-top:8px;'>
+                    * <strong>Sesgo (Bias):</strong> Un valor positivo indica que el modelo sobrestima la variable; un valor negativo indica subestimación.<br>
+                    * <strong>MAE:</strong> Error absoluto medio promedio hora a hora.
+                </p>
+            </div>
+            """
+
+if not html_validacion:
+    html_validacion = """
+    <div style='background:#fffaf0; padding:15px; border-left:4px solid #dd6b20; border-radius:4px; margin-bottom:30px; font-size:14px; color:#7b341e;'>
+        <strong>Acumulando histórico:</strong> El sistema ha comenzado a registrar las corridas diarias. Las métricas de error (MAE y Sesgo) aparecerán en esta sección automáticamente tras acumular las primeras coincidencias horarias entre el modelo y tus estaciones.
+    </div>
+    """
+
+# ==============================================================================
+# 5. GENERACIÓN DE GRÁFICOS PLOTLY
 # ==============================================================================
 
-# Gráfico de Isoterma Cero (Termas del Flaco como cota de referencia alta)
+# Gráfico de Isoterma Cero
 df_flaco = df[df["Punto"] == "Termas del Flaco"].copy()
 fig_iso = go.Figure()
 fig_iso.add_trace(go.Scatter(
@@ -174,7 +290,7 @@ fig_iso.update_layout(
 )
 html_isoterma = f"<div style='margin-bottom: 45px;'>{fig_iso.to_html(full_html=False, include_plotlyjs='cdn')}</div>"
 
-# Gráficos detallados de puntos (con datos reales para BT Portillo y BT Tinguiririca)
+# Gráficos por Punto
 html_puntos = ""
 for punto in PUNTOS.keys():
     df_p = df[df["Punto"] == punto].copy()
@@ -198,14 +314,14 @@ for punto in PUNTOS.keys():
         specs=[[{"secondary_y": False}], [{"secondary_y": True}]]
     )
 
-    # 1. Temperatura Pronosticada
+    # Curva de Temperatura Pronosticada
     fig.add_trace(
         go.Scatter(x=df_p["Fecha_Validez"], y=df_p["T2"], name="Temp. Pronosticada (WRF)",
                    line=dict(color="#d9381e", width=2.5)),
         row=1, col=1
     )
 
-    # 1b. Temperatura Observada (si existe estación)
+    # Curva de Temperatura Observada
     if punto in datos_observados and not datos_observados[punto].empty:
         df_o = datos_observados[punto]
         fig.add_trace(
@@ -216,7 +332,7 @@ for punto in PUNTOS.keys():
 
     fig.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="0°C", row=1, col=1)
 
-    # 2. Precipitación Pronosticada
+    # Precipitación Pronosticada
     fig.add_trace(
         go.Bar(x=df_p["Fecha_Validez"], y=df_p["PP"], name="PP Pronosticada (mm/h)",
                marker_color="#3182bd", opacity=0.7),
@@ -228,7 +344,7 @@ for punto in PUNTOS.keys():
         row=2, col=1, secondary_y=True
     )
 
-    # 2b. Precipitación Observada (si existe estación)
+    # Precipitación Observada
     if punto in datos_observados and not datos_observados[punto].empty:
         df_o = datos_observados[punto]
         fig.add_trace(
@@ -253,7 +369,7 @@ for punto in PUNTOS.keys():
     html_puntos += f"<div style='margin-bottom: 50px;'>{fig.to_html(full_html=False, include_plotlyjs=False)}</div>"
 
 # ==============================================================================
-# 5. ENSAMBLAJE HTML FINAL
+# 6. ENSAMBLAJE HTML COMPLETO
 # ==============================================================================
 html_final = f"""<!DOCTYPE html>
 <html lang="es">
@@ -266,24 +382,27 @@ html_final = f"""<!DOCTYPE html>
         .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }}
         h1 {{ color: #1a365d; margin-top: 0; font-size: 26px; }}
         .meta {{ background: #edf2f7; padding: 12px 18px; border-radius: 6px; margin-bottom: 25px; font-size: 14px; line-height: 1.6; }}
-        .section-title {{ font-size: 20px; color: #2c5282; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; margin-top: 30px; margin-bottom: 20px; }}
+        .section-title {{ font-size: 20px; color: #2c5282; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; margin-top: 35px; margin-bottom: 20px; }}
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Sistema de Pronóstico y Monitoreo Cuenca del Tinguiririca</h1>
+        <h1>Sistema de Pronóstico, Monitoreo y Validación - Cuenca del Tinguiririca</h1>
         <div class="meta">
-            <strong>Modelo Atmosférico:</strong> WRF-SMN (Resolución operativa, AWS Open Data)<br>
+            <strong>Modelo Atmosférico:</strong> WRF-SMN (Resolución operativa en AWS Open Data)<br>
             <strong>Corrida:</strong> {fecha_corrida:%Y-%m-%d %H:00} UTC | 
             <strong>Actualizado:</strong> {ahora:%Y-%m-%d %H:%M} UTC<br>
-            <strong>Estaciones en Tiempo Real integradas:</strong> BT Portillo y BT Tinguiririca (Ambient Weather)
+            <strong>Estaciones en Superficie:</strong> BT Portillo y BT Tinguiririca (Ambient Weather)
         </div>
-        
+
         <div class="section-title">1. Proyección de Isoterma Cero y Análisis de Altitud</div>
-        <p style="font-size: 14px; color: #4a5568;">Banda calculada con gradientes de 6.5 a 9.0 °C/1.000 m sobre cotas de referencia de la cuenca alta.</p>
+        <p style="font-size: 14px; color: #4a5568;">Banda calculada con gradientes térmicos verticales de 6.5 a 9.0 °C/1.000 m sobre la alta cuenca.</p>
         {html_isoterma}
 
-        <div class="section-title">2. Pronósticos y Validación con Estaciones en Superficie</div>
+        <div class="section-title">2. Validación Histórica: Pronóstico WRF vs. Estaciones Reales</div>
+        {html_validacion}
+
+        <div class="section-title">3. Pronósticos Detallados por Estación (72 Horas)</div>
         {html_puntos}
     </div>
 </body>
@@ -292,5 +411,4 @@ html_final = f"""<!DOCTYPE html>
 with open("index.html", "w", encoding="utf-8") as f:
     f.write(html_final)
 
-print("Reporte con integración de estaciones generado exitosamente en 'index.html'.")
-print("Reporte generado exitosamente en 'index.html'.")
+print("Reporte con validación histórica y base acumulada generado exitosamente.")
