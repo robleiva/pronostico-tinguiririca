@@ -25,7 +25,7 @@ jobs:
       - name: Instalar librerías
         run: |
           pip install --upgrade pip
-          pip install xarray h5netcdf s3fs cartopy pandas plotly
+          pip install -r requirements.txt
 
       - name: Ejecutar corrida y generar HTML
         run: |
