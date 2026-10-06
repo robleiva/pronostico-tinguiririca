@@ -76,7 +76,7 @@ def obtener_datos_estacion(mac, nombre, limit=288):
 
         registros = []
         for r in data:
-            # Timestamp UTC de la estación convertido a Hora Local de Chile
+            # Timestamp UTC convertido a Hora Local de Chile
             fecha_chile = pd.to_datetime(r.get("dateutc"), unit='ms', utc=True).tz_convert(ZONA_CHILE).tz_localize(None)
             tf = r.get("tempf")
             tc = round((tf - 32) * 5/9, 2) if tf is not None else None
@@ -91,7 +91,6 @@ def obtener_datos_estacion(mac, nombre, limit=288):
             })
 
         df_obs = pd.DataFrame(registros).sort_values("Fecha_Local").reset_index(drop=True)
-        # Resampleo a nivel horario
         df_obs = df_obs.resample('1h', on='Fecha_Local').agg({'Punto': 'first', 'T2_Obs': 'mean', 'PP_Obs': 'max'}).reset_index()
         df_obs['PP_Obs_acum'] = df_obs['PP_Obs'].cumsum()
         print(f"[Ambient] Correcto: {len(df_obs)} registros para {nombre}.")
@@ -110,11 +109,14 @@ for nom_est, mac_est in ESTACIONES_AMBIENT.items():
             datos_observados[nom_est] = df_est
             obs_acumuladas.append(df_est[['Punto', 'Fecha_Local', 'T2_Obs', 'PP_Obs']])
 
-# Actualizar CSV acumulado de observaciones
+# Actualizar CSV acumulado de observaciones con compatibilidad de columnas
 if obs_acumuladas:
     df_nuevas_obs = pd.concat(obs_acumuladas, ignore_index=True)
     if os.path.exists(FILE_HIST_OBS):
         df_prev_obs = pd.read_csv(FILE_HIST_OBS)
+        # Migrar columna si venía de la versión previa
+        if "Fecha_Validez" in df_prev_obs.columns and "Fecha_Local" not in df_prev_obs.columns:
+            df_prev_obs.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
         df_prev_obs['Fecha_Local'] = pd.to_datetime(df_prev_obs['Fecha_Local'])
         df_total_obs = pd.concat([df_prev_obs, df_nuevas_obs]).drop_duplicates(subset=['Punto', 'Fecha_Local'], keep='last')
     else:
@@ -153,9 +155,7 @@ for lead_time in range(1, 73):
                     for nom, c in PUNTOS.items():
                         coords_proy[nom] = data_crs.transform_point(c["lon"], c["lat"], src_crs=ccrs.PlateCarree())
 
-                # Fecha de validez original en UTC
                 f_validez_utc = pd.to_datetime(fecha_corrida + datetime.timedelta(hours=lead_time)).tz_localize('UTC')
-                # Conversión a Hora Local de Chile
                 f_validez_chile = f_validez_utc.tz_convert(ZONA_CHILE).tz_localize(None)
 
                 for nom, (xp, yp) in coords_proy.items():
@@ -187,10 +187,12 @@ df = pd.DataFrame(registros)
 if df.empty:
     raise RuntimeError("No se descargaron datos de los archivos NetCDF.")
 
-# Actualizar CSV acumulado de pronósticos
+# Actualizar CSV acumulado de pronósticos con compatibilidad de columnas
 df_nuevo_fcst = df[['Punto', 'Fecha_Corrida_UTC', 'Fecha_Local', 'Lead_Time', 'T2', 'PP']]
 if os.path.exists(FILE_HIST_FCST):
     df_prev_fcst = pd.read_csv(FILE_HIST_FCST)
+    if "Fecha_Validez" in df_prev_fcst.columns and "Fecha_Local" not in df_prev_fcst.columns:
+        df_prev_fcst.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
     df_prev_fcst['Fecha_Local'] = pd.to_datetime(df_prev_fcst['Fecha_Local'])
     df_total_fcst = pd.concat([df_prev_fcst, df_nuevo_fcst]).drop_duplicates(subset=['Punto', 'Fecha_Corrida_UTC', 'Lead_Time'], keep='last')
 else:
@@ -206,10 +208,15 @@ metricas_filas = []
 if os.path.exists(FILE_HIST_OBS) and os.path.exists(FILE_HIST_FCST):
     df_h_obs = pd.read_csv(FILE_HIST_OBS)
     df_h_fcst = pd.read_csv(FILE_HIST_FCST)
+    
+    if "Fecha_Validez" in df_h_obs.columns and "Fecha_Local" not in df_h_obs.columns:
+        df_h_obs.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
+    if "Fecha_Validez" in df_h_fcst.columns and "Fecha_Local" not in df_h_fcst.columns:
+        df_h_fcst.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
+
     df_h_obs['Fecha_Local'] = pd.to_datetime(df_h_obs['Fecha_Local'])
     df_h_fcst['Fecha_Local'] = pd.to_datetime(df_h_fcst['Fecha_Local'])
 
-    # Cruzar pronósticos de corto plazo (1 a 24h) con observaciones por Fecha_Local
     df_fcst_24 = df_h_fcst[(df_h_fcst['Lead_Time'] >= 1) & (df_h_fcst['Lead_Time'] <= 24)]
     df_cruce = pd.merge(df_fcst_24, df_h_obs, on=['Punto', 'Fecha_Local'], how='inner')
 
@@ -221,7 +228,6 @@ if os.path.exists(FILE_HIST_OBS) and os.path.exists(FILE_HIST_FCST):
             mae_t = round(float(np.mean(np.abs(error_t))), 2)
             bias_t = round(float(np.mean(error_t)), 2)
 
-            # Precipitación
             sub_pp = sub.dropna(subset=['PP', 'PP_Obs'])
             if len(sub_pp) >= 1:
                 error_pp = sub_pp['PP'] - sub_pp['PP_Obs']
