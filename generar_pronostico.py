@@ -66,6 +66,8 @@ df = pd.DataFrame(registros)
 
 # 4. Crear el reporte HTML interactivo con Plotly
 html_plots = ""
+if df.empty:
+    raise RuntimeError("No se descargaron datos de los archivos NetCDF. Verifica la corrida o la conexión a S3.")
 
 for punto in PUNTOS.keys():
     df_p = df[df["Punto"] == punto].copy()
