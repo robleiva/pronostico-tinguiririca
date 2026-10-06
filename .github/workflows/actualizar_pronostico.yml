@@ -2,9 +2,8 @@ name: Actualizacion Diaria Pronostico
 
 on:
   schedule:
-    # Corre todos los días a las 08:30 UTC (~05:30 hora de Chile)
     - cron: '30 8 * * *'
-  workflow_dispatch: # Permite ejecutarlo manualmente con un clic en GitHub
+  workflow_dispatch:
 
 permissions:
   contents: write
