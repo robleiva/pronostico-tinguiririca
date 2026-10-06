@@ -36,20 +36,71 @@ FILE_HIST_OBS = os.path.join(HISTORICO_DIR, "observaciones_ambient.csv")
 FILE_HIST_FCST = os.path.join(HISTORICO_DIR, "pronosticos_wrf.csv")
 
 # ==============================================================================
-# 2. CONSULTA Y PERSISTENCIA DE AMBIENT WEATHER
+# 2. CONSULTA Y PERSISTENCIA DE AMBIENT WEATHER (CON AUTO-DETECCIÓN Y DEBUG)
 # ==============================================================================
+AMBIENT_API_KEY = os.environ.get("AMBIENT_API_KEY", "").strip()
+AMBIENT_APP_KEY = os.environ.get("AMBIENT_APPLICATION_KEY", "").strip()
+
+# Formatear MACs eliminando espacios en blanco accidentales
+MAC_PORTILLO = os.environ.get("MAC_PORTILLO", "").strip()
+MAC_TINGUIRIRICA = os.environ.get("MAC_TINGUIRIRICA", "").strip()
+
+ESTACIONES_AMBIENT = {
+    "BT Portillo": MAC_PORTILLO,
+    "BT Tinguiririca": MAC_TINGUIRIRICA
+}
+
+def descubrir_dispositivos():
+    """Consulta la lista de estaciones registradas en la cuenta para validar MACs."""
+    if not AMBIENT_API_KEY or not AMBIENT_APP_KEY:
+        print("[Ambient] Falta AMBIENT_API_KEY o AMBIENT_APPLICATION_KEY en Secrets.")
+        return {}
+    url = "https://rt.ambientweather.net/v1/devices"
+    params = {"apiKey": AMBIENT_API_KEY, "applicationKey": AMBIENT_APP_KEY}
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        if r.status_code == 200:
+            devs = r.json()
+            print(f"[Ambient] Dispositivos encontrados en cuenta ({len(devs)}):")
+            mapa_devs = {}
+            for d in devs:
+                mac_d = d.get("macAddress", "")
+                nombre_d = d.get("info", {}).get("name", "Sin nombre")
+                print(f"  -> Nombre: '{nombre_d}' | MAC: '{mac_d}'")
+                mapa_devs[mac_d.lower()] = mac_d
+            return mapa_devs
+        else:
+            print(f"[Ambient] Error al listar dispositivos: {r.status_code} - {r.text}")
+    except Exception as e:
+        print(f"[Ambient] Excepción listando dispositivos: {e}")
+    return {}
+
 def obtener_datos_estacion(mac, nombre, limit=288):
-    if not AMBIENT_API_KEY or not AMBIENT_APP_KEY or not mac:
+    if not mac:
+        print(f"[Aviso] No se proporcionó MAC para {nombre}.")
         return pd.DataFrame()
+    
     url = f"https://rt.ambientweather.net/v1/devices/{mac}"
     params = {"apiKey": AMBIENT_API_KEY, "applicationKey": AMBIENT_APP_KEY, "limit": limit}
     try:
         resp = requests.get(url, params=params, timeout=15)
+        print(f"[Ambient] Petición a {nombre} ({mac}) -> Status {resp.status_code}")
+        
         if resp.status_code != 200:
-            print(f"[Aviso] Ambient Weather ({nombre}) error: {resp.status_code}")
+            # Reintentar sin dos puntos si la MAC traía separadores
+            mac_alt = mac.replace(":", "") if ":" in mac else mac
+            if mac_alt != mac:
+                url_alt = f"https://rt.ambientweather.net/v1/devices/{mac_alt}"
+                resp = requests.get(url_alt, params=params, timeout=15)
+                print(f"[Ambient] Reintento alternativo para {nombre} ({mac_alt}) -> Status {resp.status_code}")
+
+        if resp.status_code != 200:
+            print(f"[Aviso] No fue posible obtener datos para {nombre}: {resp.text}")
             return pd.DataFrame()
+
         data = resp.json()
         if not data:
+            print(f"[Aviso] Respuesta vacía de Ambient Weather para {nombre}.")
             return pd.DataFrame()
 
         registros = []
@@ -67,13 +118,16 @@ def obtener_datos_estacion(mac, nombre, limit=288):
                 "PP_Obs": pp_h
             })
         df_obs = pd.DataFrame(registros).sort_values("Fecha_Validez").reset_index(drop=True)
-        # Resampleo horario promediando temperatura y tomando el valor horario de lluvia
         df_obs = df_obs.resample('1h', on='Fecha_Validez').agg({'Punto': 'first', 'T2_Obs': 'mean', 'PP_Obs': 'max'}).reset_index()
         df_obs['PP_Obs_acum'] = df_obs['PP_Obs'].cumsum()
+        print(f"[Ambient] Éxito: {len(df_obs)} registros procesados para {nombre}.")
         return df_obs
     except Exception as e:
         print(f"[Error] Falló descarga de Ambient ({nombre}): {e}")
         return pd.DataFrame()
+
+# Descubrimiento previo de dispositivos en tu cuenta
+dispositivos_cuenta = descubrir_dispositivos()
 
 datos_observados = {}
 obs_acumuladas = []
@@ -84,17 +138,6 @@ for nom_est, mac_est in ESTACIONES_AMBIENT.items():
         if not df_est.empty:
             datos_observados[nom_est] = df_est
             obs_acumuladas.append(df_est[['Punto', 'Fecha_Validez', 'T2_Obs', 'PP_Obs']])
-
-# Actualizar archivo acumulado de observaciones
-if obs_acumuladas:
-    df_nuevas_obs = pd.concat(obs_acumuladas, ignore_index=True)
-    if os.path.exists(FILE_HIST_OBS):
-        df_prev_obs = pd.read_csv(FILE_HIST_OBS)
-        df_prev_obs['Fecha_Validez'] = pd.to_datetime(df_prev_obs['Fecha_Validez'])
-        df_total_obs = pd.concat([df_prev_obs, df_nuevas_obs]).drop_duplicates(subset=['Punto', 'Fecha_Validez'], keep='last')
-    else:
-        df_total_obs = df_nuevas_obs
-    df_total_obs.to_csv(FILE_HIST_OBS, index=False)
 
 # ==============================================================================
 # 3. EXTRACCIÓN DE PRONÓSTICO DE AWS S3 (WRF-SMN 72 HORAS)
