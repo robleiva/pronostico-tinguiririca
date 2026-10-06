@@ -76,24 +76,39 @@ def obtener_datos_estacion(mac, nombre, limit=288):
 
         registros = []
         for r in data:
-            # Timestamp UTC convertido a Hora Local de Chile
             fecha_chile = pd.to_datetime(r.get("dateutc"), unit='ms', utc=True).tz_convert(ZONA_CHILE).tz_localize(None)
             tf = r.get("tempf")
             tc = round((tf - 32) * 5/9, 2) if tf is not None else None
-            hourly_in = r.get("hourlyrainin", 0.0)
-            pp_h = round(hourly_in * 25.4, 2) if hourly_in is not None else 0.0
+            
+            # Usar dailyrainin para calcular incrementos reales y evitar duplicación de ventana móvil
+            daily_in = r.get("dailyrainin", 0.0)
+            daily_mm = round(daily_in * 25.4, 2) if daily_in is not None else 0.0
 
             registros.append({
                 "Punto": nombre,
                 "Fecha_Local": fecha_chile,
                 "T2_Obs": tc,
-                "PP_Obs": pp_h
+                "Daily_PP_mm": daily_mm
             })
 
-        df_obs = pd.DataFrame(registros).sort_values("Fecha_Local").reset_index(drop=True)
-        df_obs = df_obs.resample('1h', on='Fecha_Local').agg({'Punto': 'first', 'T2_Obs': 'mean', 'PP_Obs': 'max'}).reset_index()
-        df_obs['PP_Obs_acum'] = df_obs['PP_Obs'].cumsum()
-        print(f"[Ambient] Correcto: {len(df_obs)} registros para {nombre}.")
+        df_raw = pd.DataFrame(registros).sort_values("Fecha_Local").reset_index(drop=True)
+        
+        # Calcular lluvia horaria real a partir de los incrementos del total diario
+        df_raw['PP_diff'] = df_raw['Daily_PP_mm'].diff().fillna(0)
+        # Si hay cambio de día (reset a 0), evitar valores negativos
+        df_raw.loc[df_raw['PP_diff'] < 0, 'PP_diff'] = df_raw['Daily_PP_mm']
+        
+        # Resumir a nivel horario exacto
+        df_obs = df_raw.resample('1h', on='Fecha_Local').agg({
+            'Punto': 'first',
+            'T2_Obs': 'mean',
+            'PP_diff': 'sum'
+        }).reset_index().rename(columns={'PP_diff': 'PP_Obs'})
+        
+        df_obs['PP_Obs'] = df_obs['PP_Obs'].round(2)
+        df_obs['PP_Obs_acum'] = df_obs['PP_Obs'].cumsum().round(2)
+        
+        print(f"[Ambient] Correcto: {len(df_obs)} registros procesados para {nombre}.")
         return df_obs
     except Exception as e:
         print(f"[Error] Excepción descargando {nombre}: {e}")
@@ -109,12 +124,10 @@ for nom_est, mac_est in ESTACIONES_AMBIENT.items():
             datos_observados[nom_est] = df_est
             obs_acumuladas.append(df_est[['Punto', 'Fecha_Local', 'T2_Obs', 'PP_Obs']])
 
-# Actualizar CSV acumulado de observaciones con compatibilidad de columnas
 if obs_acumuladas:
     df_nuevas_obs = pd.concat(obs_acumuladas, ignore_index=True)
     if os.path.exists(FILE_HIST_OBS):
         df_prev_obs = pd.read_csv(FILE_HIST_OBS)
-        # Migrar columna si venía de la versión previa
         if "Fecha_Validez" in df_prev_obs.columns and "Fecha_Local" not in df_prev_obs.columns:
             df_prev_obs.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
         df_prev_obs['Fecha_Local'] = pd.to_datetime(df_prev_obs['Fecha_Local'])
