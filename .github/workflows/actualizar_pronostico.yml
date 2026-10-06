@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Configurar Python
         uses: actions/setup-python@v5
@@ -28,7 +30,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Ejecutar corrida y generar HTML
+      - name: Ejecutar corrida, guardar historico y generar HTML
         env:
           AMBIENT_API_KEY: ${{ secrets.AMBIENT_API_KEY }}
           AMBIENT_APPLICATION_KEY: ${{ secrets.AMBIENT_APPLICATION_KEY }}
@@ -36,6 +38,13 @@ jobs:
           MAC_TINGUIRIRICA: ${{ secrets.MAC_TINGUIRIRICA }}
         run: |
           python generar_pronostico.py
+
+      - name: Guardar datos historicos en el repositorio
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add historico/
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto: Actualizar historico observaciones y pronosticos [skip ci]" && git push origin main)
 
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v4
