@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Instalar librerías del sistema y Python
+      - name: Instalar librerías
         run: |
           pip install --upgrade pip
           pip install xarray h5netcdf s3fs cartopy pandas plotly
