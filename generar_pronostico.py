@@ -329,16 +329,27 @@ if os.path.exists(FILE_HIST_OBS) and os.path.exists(FILE_HIST_FCST):
         """
 
 # ==============================================================================
-# 6. GENERACIÓN DE GRÁFICOS PLOTLY (HIPSOMETRÍA MEJORADA + ZOOM DINÁMICO)
+# 6. GENERACIÓN DE GRÁFICOS PLOTLY (HIPSOMETRÍA NIEVE/AGUA + EMPALME WRF)
 # ==============================================================================
 
-# A. Gráfico Hipsométrico e Isoterma Dinámica (Colores Fríos / Nieve-Agua)
+# Cargar histórico de pronósticos WRF para empalmar horas pasadas en los gráficos
+df_h_wrf_prev = pd.DataFrame()
+if os.path.exists(FILE_HIST_FCST):
+    try:
+        df_h_wrf_prev = pd.read_csv(FILE_HIST_FCST)
+        if "Fecha_Validez" in df_h_wrf_prev.columns and "Fecha_Local" not in df_h_wrf_prev.columns:
+            df_h_wrf_prev.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
+        df_h_wrf_prev['Fecha_Local'] = pd.to_datetime(df_h_wrf_prev['Fecha_Local'])
+    except Exception as e:
+        print(f"[Aviso] No se pudo leer histórico previo para empalme: {e}")
+
+# A. Gráfico Hipsométrico e Isoterma Dinámica (Lluvia Líquida vs. Nieve)
 df_flaco = df[df["Punto"] == "Termas del Flaco"].copy()
 fig_iso = make_subplots(
-    rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.16,
+    rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.18,
     subplot_titles=(
         "<b>Cota de Isoterma 0 °C Proyectada (m s. n. m.) con Gradiente Real Dinámico</b>",
-        "<b>Área y Porcentaje de Cuenca Activa bajo Lluvia Líquida (Hipsometría: 1.109 km²)</b>"
+        "<b>Distribución Hipsométrica de la Cuenca: Lluvia Líquida vs. Nieve (1.109,3 km²)</b>"
     ),
     specs=[[{"secondary_y": False}], [{"secondary_y": True}]]
 )
@@ -367,30 +378,39 @@ for i, (nombre_p, meta) in enumerate(list(PUNTOS.items())[:5]):
         row=1, col=1
     )
 
-# Panel 2: Respuesta Hipsométrica en tonalidades de deshielo (Celeste / Nieve-Agua)
+# Panel 2: Distribución Nieve vs. Lluvia Líquida
+# Capa 1: Lluvia líquida (desde cota mínima hasta isoterma)
 fig_iso.add_trace(go.Scatter(
     x=df_flaco["Fecha_Local"], y=df_flaco["Area_Pluvial_km2"],
-    mode='lines', line=dict(color='#00acc1', width=2.5),
-    fill='tozeroy', fillcolor='rgba(128, 222, 234, 0.35)',
-    name='Área Drenante Líquida (km²)'
+    mode='lines', line=dict(color='#00acc1', width=2),
+    fill='tozeroy', fillcolor='rgba(77, 208, 225, 0.45)',
+    name='Área con Lluvia Líquida (Escorrentía)'
 ), row=2, col=1, secondary_y=False)
 
+# Capa 2: Nieve acumulada en cordillera (desde la isoterma hasta los 1.109,3 km²)
+area_total_vec = [1109.29] * len(df_flaco)
+fig_iso.add_trace(go.Scatter(
+    x=df_flaco["Fecha_Local"], y=area_total_vec,
+    mode='lines', line=dict(color='#90a4ae', width=1, dash='dot'),
+    fill='tonexty', fillcolor='rgba(236, 239, 241, 0.75)',
+    name='Área con Nieve Sólida (Retención Nival)'
+), row=2, col=1, secondary_y=False)
+
+# Línea del porcentaje activo sobre eje secundario
 fig_iso.add_trace(go.Scatter(
     x=df_flaco["Fecha_Local"], y=df_flaco["Pct_Pluvial"],
-    mode='lines', line=dict(color='#006064', width=2, dash='dash'),
-    name='% Cuenca bajo Isoterma'
+    mode='lines', line=dict(color='#004d40', width=2.5, dash='dash'),
+    name='% Cuenca Activa (Líquida)'
 ), row=2, col=1, secondary_y=True)
 
 fig_iso.update_layout(
-    height=740, hovermode="x unified", template="plotly_white",
-    margin=dict(l=40, r=40, t=50, b=40)
+    height=760, hovermode="x unified", template="plotly_white",
+    margin=dict(l=65, r=50, t=50, b=40)
 )
 fig_iso.update_yaxes(title_text="Altitud (m)", row=1, col=1)
-fig_iso.update_yaxes(title_text="Área Líquida (km²)", range=[0, 1150], row=2, col=1, secondary_y=False)
-
-# Escala cerrada cada 20% para el eje de porcentaje
+fig_iso.update_yaxes(title_text="Superficie de Cuenca (km²)", range=[0, 1150], row=2, col=1, secondary_y=False)
 fig_iso.update_yaxes(
-    title_text="% Cuenca Activa",
+    title_text="% Cuenca Líquida",
     range=[0, 100],
     tickmode='linear',
     tick0=0,
@@ -402,12 +422,24 @@ fig_iso.update_xaxes(title_text="Fecha y Hora (Hora Local de Chile)", row=2, col
 
 html_isoterma = f"<div style='margin-bottom: 45px;'>{fig_iso.to_html(full_html=False, include_plotlyjs='cdn')}</div>"
 
-# B. Gráficos Detallados por Estación (Barras más visibles + Barra de Navegación/Zoom)
+# B. Gráficos Detallados por Estación (con Empalme Histórico WRF)
 html_puntos = ""
 for punto in PUNTOS.keys():
     df_p = df[df["Punto"] == punto].copy()
     if df_p.empty:
         continue
+
+    # Empalmar con corridas anteriores del WRF si existen en el histórico
+    if not df_h_wrf_prev.empty:
+        sub_h = df_h_wrf_prev[df_h_wrf_prev['Punto'] == punto].copy()
+        # Tomar registros anteriores a la corrida actual
+        sub_h = sub_h[sub_h['Fecha_Local'] < df_p['Fecha_Local'].min()]
+        if not sub_h.empty:
+            sub_h = sub_h.sort_values('Lead_Time').drop_duplicates(subset=['Fecha_Local'], keep='first')
+            cols_unir = [c for c in ['Fecha_Local', 'T2', 'PP'] if c in sub_h.columns]
+            df_p = pd.concat([sub_h[cols_unir], df_p], ignore_index=True).sort_values('Fecha_Local').reset_index(drop=True)
+
+    # Calcular acumulado completo continuo
     df_p["PP_acum"] = df_p["PP"].cumsum()
 
     subtitulos = (
@@ -416,7 +448,7 @@ for punto in PUNTOS.keys():
     )
 
     fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.10,
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
         subplot_titles=subtitulos,
         specs=[[{"secondary_y": False}], [{"secondary_y": True}]]
     )
@@ -479,14 +511,12 @@ for punto in PUNTOS.keys():
                        line=dict(color="#006400", width=2.5)), row=2, col=1, secondary_y=True
         )
 
-    # Configuración de zoom interactivo y botones rápidos
     layout_update = dict(
         height=680, hovermode="x unified", template="plotly_white",
         bargap=0.15,
-        margin=dict(l=40, r=40, t=50, b=40)
+        margin=dict(l=55, r=50, t=50, b=40)
     )
 
-    # Añadir Range Slider y controles en BT Portillo y BT Tinguiririca
     if punto in ["BT Portillo", "BT Tinguiririca"]:
         fig.update_xaxes(
             rangeslider=dict(visible=True, thickness=0.06),
