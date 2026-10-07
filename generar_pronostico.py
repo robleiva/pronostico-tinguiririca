@@ -329,16 +329,16 @@ if os.path.exists(FILE_HIST_OBS) and os.path.exists(FILE_HIST_FCST):
         """
 
 # ==============================================================================
-# 6. GENERACIÓN DE GRÁFICOS PLOTLY (HIPSOMETRÍA + MULTI-MODELO)
+# 6. GENERACIÓN DE GRÁFICOS PLOTLY (HIPSOMETRÍA MEJORADA + ZOOM DINÁMICO)
 # ==============================================================================
 
-# A. Gráfico Hipsométrico e Isoterma Dinámica
+# A. Gráfico Hipsométrico e Isoterma Dinámica (Colores Fríos / Nieve-Agua)
 df_flaco = df[df["Punto"] == "Termas del Flaco"].copy()
 fig_iso = make_subplots(
-    rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.10,
+    rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.16,
     subplot_titles=(
-        "Cota de Isoterma 0 °C Proyectada (m s. n. m.) con Gradiente Real Dinámico",
-        "Área y Porcentaje de Cuenca Activa bajo Lluvia Líquida (Hipsometría: 1.109 km²)"
+        "<b>Cota de Isoterma 0 °C Proyectada (m s. n. m.) con Gradiente Real Dinámico</b>",
+        "<b>Área y Porcentaje de Cuenca Activa bajo Lluvia Líquida (Hipsometría: 1.109 km²)</b>"
     ),
     specs=[[{"secondary_y": False}], [{"secondary_y": True}]]
 )
@@ -351,11 +351,11 @@ fig_iso.add_trace(go.Scatter(
 fig_iso.add_trace(go.Scatter(
     x=df_flaco["Fecha_Local"], y=df_flaco["Iso0_Baja"],
     mode='lines', line=dict(width=0), fill='tonexty',
-    fillcolor='rgba(0, 128, 255, 0.18)', name='Banda Teórica (6.5 - 9.0 °C/km)'
+    fillcolor='rgba(178, 235, 242, 0.40)', name='Banda Teórica (6.5 - 9.0 °C/km)'
 ), row=1, col=1)
 fig_iso.add_trace(go.Scatter(
     x=df_flaco["Fecha_Local"], y=df_flaco["Iso0_Dinamica"],
-    mode='lines+markers', line=dict(color='#0052cc', width=2.8),
+    mode='lines+markers', line=dict(color='#0288d1', width=3),
     name='Isoterma 0 °C (Gradiente Dinámico Real)'
 ), row=1, col=1)
 
@@ -367,32 +367,42 @@ for i, (nombre_p, meta) in enumerate(list(PUNTOS.items())[:5]):
         row=1, col=1
     )
 
-# Panel 2: Respuesta Hipsométrica (% y km² de cuenca pluvial)
+# Panel 2: Respuesta Hipsométrica en tonalidades de deshielo (Celeste / Nieve-Agua)
 fig_iso.add_trace(go.Scatter(
     x=df_flaco["Fecha_Local"], y=df_flaco["Area_Pluvial_km2"],
-    mode='lines', line=dict(color='#2ca02c', width=2.5),
-    fill='tozeroy', fillcolor='rgba(44, 160, 44, 0.15)',
+    mode='lines', line=dict(color='#00acc1', width=2.5),
+    fill='tozeroy', fillcolor='rgba(128, 222, 234, 0.35)',
     name='Área Drenante Líquida (km²)'
 ), row=2, col=1, secondary_y=False)
 
 fig_iso.add_trace(go.Scatter(
     x=df_flaco["Fecha_Local"], y=df_flaco["Pct_Pluvial"],
-    mode='lines', line=dict(color='#1b7837', width=1.8, dash='dot'),
+    mode='lines', line=dict(color='#006064', width=2, dash='dash'),
     name='% Cuenca bajo Isoterma'
 ), row=2, col=1, secondary_y=True)
 
 fig_iso.update_layout(
-    height=680, hovermode="x unified", template="plotly_white",
+    height=740, hovermode="x unified", template="plotly_white",
     margin=dict(l=40, r=40, t=50, b=40)
 )
 fig_iso.update_yaxes(title_text="Altitud (m)", row=1, col=1)
-fig_iso.update_yaxes(title_text="Área Líquida (km²)", row=2, col=1, secondary_y=False)
-fig_iso.update_yaxes(title_text="% Cuenca Activa", range=[0, 100], row=2, col=1, secondary_y=True)
+fig_iso.update_yaxes(title_text="Área Líquida (km²)", range=[0, 1150], row=2, col=1, secondary_y=False)
+
+# Escala cerrada cada 20% para el eje de porcentaje
+fig_iso.update_yaxes(
+    title_text="% Cuenca Activa",
+    range=[0, 100],
+    tickmode='linear',
+    tick0=0,
+    dtick=20,
+    ticksuffix="%",
+    row=2, col=1, secondary_y=True
+)
 fig_iso.update_xaxes(title_text="Fecha y Hora (Hora Local de Chile)", row=2, col=1)
 
 html_isoterma = f"<div style='margin-bottom: 45px;'>{fig_iso.to_html(full_html=False, include_plotlyjs='cdn')}</div>"
 
-# B. Gráficos Detallados por Estación (Multi-Modelo: WRF + ECMWF + GFS + Estación Real)
+# B. Gráficos Detallados por Estación (Barras más visibles + Barra de Navegación/Zoom)
 html_puntos = ""
 for punto in PUNTOS.keys():
     df_p = df[df["Punto"] == punto].copy()
@@ -401,17 +411,17 @@ for punto in PUNTOS.keys():
     df_p["PP_acum"] = df_p["PP"].cumsum()
 
     subtitulos = (
-        f"Temperatura (°C) - {punto} ({PUNTOS[punto]['alt']} m s. n. m.) [Multi-Modelo]",
-        f"Precipitación Horaria y Acumulada - {punto} [Multi-Modelo]"
+        f"<b>Temperatura (°C) - {punto} ({PUNTOS[punto]['alt']} m s. n. m.)</b>",
+        f"<b>Precipitación Horaria y Acumulada - {punto}</b>"
     )
 
     fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.10,
         subplot_titles=subtitulos,
         specs=[[{"secondary_y": False}], [{"secondary_y": True}]]
     )
 
-    # 1. TEMPERATURA: WRF, ECMWF, GFS y Estación
+    # 1. TEMPERATURA
     fig.add_trace(
         go.Scatter(x=df_p["Fecha_Local"], y=df_p["T2"], name="Temp WRF-SMN",
                    line=dict(color="#d9381e", width=2.5)), row=1, col=1
@@ -437,14 +447,14 @@ for punto in PUNTOS.keys():
 
     fig.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="0°C", row=1, col=1)
 
-    # 2. PRECIPITACIÓN: Barras horarias y acumulados comparados
+    # 2. PRECIPITACIÓN
     fig.add_trace(
         go.Bar(x=df_p["Fecha_Local"], y=df_p["PP"], name="PP WRF (mm/h)",
-               marker_color="#3182bd", opacity=0.65), row=2, col=1, secondary_y=False
+               marker_color="#29b6f6", opacity=0.75), row=2, col=1, secondary_y=False
     )
     fig.add_trace(
         go.Scatter(x=df_p["Fecha_Local"], y=df_p["PP_acum"], name="Acum. WRF (mm)",
-                   line=dict(color="#08519c", width=2.5)), row=2, col=1, secondary_y=True
+                   line=dict(color="#01579b", width=2.5)), row=2, col=1, secondary_y=True
     )
 
     if punto in datos_multi_modelo:
@@ -462,17 +472,35 @@ for punto in PUNTOS.keys():
         df_o = datos_observados[punto]
         fig.add_trace(
             go.Bar(x=df_o["Fecha_Local"], y=df_o["PP_Obs"], name="PP Real Estación (mm/h)",
-                   marker_color="#2ca02c", opacity=0.55), row=2, col=1, secondary_y=False
+                   marker_color="#2ca02c", opacity=0.65), row=2, col=1, secondary_y=False
         )
         fig.add_trace(
             go.Scatter(x=df_o["Fecha_Local"], y=df_o["PP_Obs_acum"], name="Acum. Real Estación (mm)",
                        line=dict(color="#006400", width=2.5)), row=2, col=1, secondary_y=True
         )
 
-    fig.update_layout(
-        height=640, hovermode="x unified", template="plotly_white",
+    # Configuración de zoom interactivo y botones rápidos
+    layout_update = dict(
+        height=680, hovermode="x unified", template="plotly_white",
+        bargap=0.15,
         margin=dict(l=40, r=40, t=50, b=40)
     )
+
+    # Añadir Range Slider y controles en BT Portillo y BT Tinguiririca
+    if punto in ["BT Portillo", "BT Tinguiririca"]:
+        fig.update_xaxes(
+            rangeslider=dict(visible=True, thickness=0.06),
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=24, label="24h", step="hour", stepmode="backward"),
+                    dict(count=48, label="48h", step="hour", stepmode="backward"),
+                    dict(step="all", label="Ver Todo")
+                ])
+            ),
+            row=2, col=1
+        )
+
+    fig.update_layout(**layout_update)
     fig.update_xaxes(title_text="Fecha y Hora (Hora Local de Chile)", row=2, col=1)
     fig.update_yaxes(title_text="Temp (°C)", row=1, col=1)
     fig.update_yaxes(title_text="PP (mm/h)", row=2, col=1, secondary_y=False)
