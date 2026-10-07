@@ -63,7 +63,7 @@ FILE_HIST_FCST = os.path.join(HISTORICO_DIR, "pronosticos_wrf.csv")
 # ==============================================================================
 # 2. CONSULTA DE AMBIENT WEATHER (ESTACIONES EN SUPERFICIE)
 # ==============================================================================
-def obtener_datos_estacion(mac, nombre, limit=288):
+def obtener_datos_estacion(mac, nombre, limit=576):  # 576 registros = 48 horas continuas
     if not AMBIENT_API_KEY or not AMBIENT_APP_KEY or not mac:
         return pd.DataFrame()
     url = f"https://rt.ambientweather.net/v1/devices/{mac}"
@@ -325,7 +325,7 @@ if os.path.exists(FILE_HIST_OBS) and os.path.exists(FILE_HIST_FCST):
         """
 
 # ==============================================================================
-# 6. GENERACIÓN DE GRÁFICOS PLOTLY (VENTANA SINCRONIZADA 24H + 72H)
+# 6. GENERACIÓN DE GRÁFICOS PLOTLY (VENTANA SINCRONIZADA CON HISTÓRICO COMPLETO)
 # ==============================================================================
 
 # Definir la ventana temporal uniforme (24h atrás hasta 72h adelante)
@@ -342,7 +342,18 @@ if os.path.exists(FILE_HIST_FCST):
             df_h_wrf_prev.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
         df_h_wrf_prev['Fecha_Local'] = pd.to_datetime(df_h_wrf_prev['Fecha_Local'])
     except Exception as e:
-        print(f"[Aviso] Lectura histórico previo: {e}")
+        print(f"[Aviso] Lectura histórico WRF: {e}")
+
+# Cargar histórico completo de observaciones reales para cubrir las 24h pasadas sin vacíos
+df_h_obs_total = pd.DataFrame()
+if os.path.exists(FILE_HIST_OBS):
+    try:
+        df_h_obs_total = pd.read_csv(FILE_HIST_OBS)
+        if "Fecha_Validez" in df_h_obs_total.columns and "Fecha_Local" not in df_h_obs_total.columns:
+            df_h_obs_total.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
+        df_h_obs_total['Fecha_Local'] = pd.to_datetime(df_h_obs_total['Fecha_Local'])
+    except Exception as e:
+        print(f"[Aviso] Lectura histórico observaciones: {e}")
 
 # Descargar ECMWF y GFS sincronizados con la ventana común
 datos_multi_modelo = {}
@@ -387,7 +398,7 @@ for i, (nombre_p, meta) in enumerate(list(PUNTOS.items())[:5]):
         row=1, col=1
     )
 
-# Panel 2: Distribución Hipsométrica (Nieve vs. Lluvia Líquida)
+# Panel 2: Distribución Nieve vs. Líquido
 fig_iso.add_trace(go.Scatter(
     x=df_flaco["Fecha_Local"], y=df_flaco["Area_Pluvial_km2"],
     mode='lines', line=dict(color='#00acc1', width=2),
@@ -428,7 +439,7 @@ fig_iso.update_xaxes(title_text="Fecha y Hora (Hora Local de Chile)", row=2, col
 
 html_isoterma = f"<div style='margin-bottom: 45px;'>{fig_iso.to_html(full_html=False, include_plotlyjs='cdn')}</div>"
 
-# B. Gráficos Detallados por Estación (Sincronización Total 24h Pasadas + 72h Futuras)
+# B. Gráficos Detallados por Estación
 html_puntos = ""
 for punto in PUNTOS.keys():
     df_p = df[df["Punto"] == punto].copy()
@@ -475,14 +486,22 @@ for punto in PUNTOS.keys():
                        line=dict(color="#9467bd", width=1.8, dash="dot")), row=1, col=1
         )
 
-    if punto in datos_observados and not datos_observados[punto].empty:
+    # Obtener serie de la estación combinando histórico + lectura actual
+    df_o_win = pd.DataFrame()
+    if not df_h_obs_total.empty:
+        sub_obs = df_h_obs_total[df_h_obs_total['Punto'] == punto].copy()
+        if not sub_obs.empty:
+            df_o_win = sub_obs[(sub_obs["Fecha_Local"] >= t_inicio_comun) & (sub_obs["Fecha_Local"] <= t_fin_comun)].sort_values("Fecha_Local").drop_duplicates(subset=["Fecha_Local"]).reset_index(drop=True)
+
+    if df_o_win.empty and punto in datos_observados and not datos_observados[punto].empty:
         df_o = datos_observados[punto]
-        df_o_win = df_o[(df_o["Fecha_Local"] >= t_inicio_comun) & (df_o["Fecha_Local"] <= t_fin_comun)].copy()
-        if not df_o_win.empty:
-            fig.add_trace(
-                go.Scatter(x=df_o_win["Fecha_Local"], y=df_o_win["T2_Obs"], name="Temp Real (Estación)",
-                           line=dict(color="#2ca02c", width=2.5)), row=1, col=1
-            )
+        df_o_win = df_o[(df_o["Fecha_Local"] >= t_inicio_comun) & (df_o["Fecha_Local"] <= t_fin_comun)].sort_values("Fecha_Local").reset_index(drop=True)
+
+    if not df_o_win.empty:
+        fig.add_trace(
+            go.Scatter(x=df_o_win["Fecha_Local"], y=df_o_win["T2_Obs"], name="Temp Real (Estación)",
+                       line=dict(color="#2ca02c", width=2.5)), row=1, col=1
+        )
 
     fig.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="0°C", row=1, col=1)
 
@@ -507,21 +526,18 @@ for punto in PUNTOS.keys():
                        line=dict(color="#9467bd", width=2, dash="dot")), row=2, col=1, secondary_y=True
         )
 
-    if punto in datos_observados and not datos_observados[punto].empty:
-        df_o = datos_observados[punto]
-        df_o_win = df_o[(df_o["Fecha_Local"] >= t_inicio_comun) & (df_o["Fecha_Local"] <= t_fin_comun)].copy().sort_values("Fecha_Local").reset_index(drop=True)
-        if not df_o_win.empty:
-            df_o_win["PP_Obs_acum_win"] = df_o_win["PP_Obs"].fillna(0).cumsum().round(2)
-            fig.add_trace(
-                go.Bar(x=df_o_win["Fecha_Local"], y=df_o_win["PP_Obs"], name="PP Real Estación (mm/h)",
-                       marker_color="#2ca02c", opacity=0.65), row=2, col=1, secondary_y=False
-            )
-            fig.add_trace(
-                go.Scatter(x=df_o_win["Fecha_Local"], y=df_o_win["PP_Obs_acum_win"], name="Acum. Real Estación (mm)",
-                           line=dict(color="#006400", width=2.5)), row=2, col=1, secondary_y=True
-            )
+    if not df_o_win.empty:
+        df_o_win["PP_Obs_acum_win"] = df_o_win["PP_Obs"].fillna(0).cumsum().round(2)
+        fig.add_trace(
+            go.Bar(x=df_o_win["Fecha_Local"], y=df_o_win["PP_Obs"], name="PP Real Estación (mm/h)",
+                   marker_color="#2ca02c", opacity=0.65), row=2, col=1, secondary_y=False
+        )
+        fig.add_trace(
+            go.Scatter(x=df_o_win["Fecha_Local"], y=df_o_win["PP_Obs_acum_win"], name="Acum. Real Estación (mm)",
+                       line=dict(color="#006400", width=2.5)), row=2, col=1, secondary_y=True
+        )
 
-    # Línea vertical divisoria entre las 24h pasadas y las 72h de pronóstico
+    # Línea vertical divisoria entre pasado y pronóstico futuro
     fig.add_vline(
         x=t_corte_actual, line_width=1.5, line_dash="dash", line_color="#718096",
         annotation_text="Inicio Pronóstico", annotation_position="top left", row=1, col=1
