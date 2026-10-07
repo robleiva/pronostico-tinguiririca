@@ -252,78 +252,130 @@ else:
 df_total_fcst.to_csv(FILE_HIST_FCST, index=False)
 
 # ==============================================================================
-# 5. MÓDULO DE VALIDACIÓN HISTÓRICA (HORA LOCAL CHILE)
+# 5. MÓDULO DE VALIDACIÓN HISTÓRICA MULTI-MODELO (WRF vs. ECMWF vs. GFS vs. REAL)
 # ==============================================================================
 html_validacion = ""
 metricas_filas = []
 
 if os.path.exists(FILE_HIST_OBS) and os.path.exists(FILE_HIST_FCST):
-    df_h_obs = pd.read_csv(FILE_HIST_OBS)
-    df_h_fcst = pd.read_csv(FILE_HIST_FCST)
-    if "Fecha_Validez" in df_h_obs.columns and "Fecha_Local" not in df_h_obs.columns:
-        df_h_obs.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
-    if "Fecha_Validez" in df_h_fcst.columns and "Fecha_Local" not in df_h_fcst.columns:
-        df_h_fcst.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
+    try:
+        df_h_obs = pd.read_csv(FILE_HIST_OBS)
+        df_h_fcst = pd.read_csv(FILE_HIST_FCST)
+        if "Fecha_Validez" in df_h_obs.columns and "Fecha_Local" not in df_h_obs.columns:
+            df_h_obs.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
+        if "Fecha_Validez" in df_h_fcst.columns and "Fecha_Local" not in df_h_fcst.columns:
+            df_h_fcst.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
 
-    df_h_obs['Fecha_Local'] = pd.to_datetime(df_h_obs['Fecha_Local'])
-    df_h_fcst['Fecha_Local'] = pd.to_datetime(df_h_fcst['Fecha_Local'])
+        df_h_obs['Fecha_Local'] = pd.to_datetime(df_h_obs['Fecha_Local'])
+        df_h_fcst['Fecha_Local'] = pd.to_datetime(df_h_fcst['Fecha_Local'])
 
-    df_fcst_24 = df_h_fcst[(df_h_fcst['Lead_Time'] >= 1) & (df_h_fcst['Lead_Time'] <= 24)]
-    df_fcst_unicos = df_fcst_24.sort_values('Lead_Time').drop_duplicates(subset=['Punto', 'Fecha_Local'], keep='first')
-    df_cruce = pd.merge(df_fcst_unicos, df_h_obs, on=['Punto', 'Fecha_Local'], how='inner')
+        # WRF desduplicado en ventana de evaluación (corto plazo 1-24h)
+        df_fcst_24 = df_h_fcst[(df_h_fcst['Lead_Time'] >= 1) & (df_h_fcst['Lead_Time'] <= 24)]
+        df_wrf_unicos = df_fcst_24.sort_values('Lead_Time').drop_duplicates(subset=['Punto', 'Fecha_Local'], keep='first')
 
-    for pto in ["BT Portillo", "BT Tinguiririca"]:
-        sub = df_cruce[df_cruce['Punto'] == pto].copy().dropna(subset=['T2', 'T2_Obs'])
-        if len(sub) >= 1:
-            error_t = sub['T2'] - sub['T2_Obs']
-            mae_t = round(float(np.mean(np.abs(error_t))), 2)
-            bias_t = round(float(np.mean(error_t)), 2)
+        for pto in ["BT Portillo", "BT Tinguiririca"]:
+            sub_obs = df_h_obs[df_h_obs['Punto'] == pto].copy().drop_duplicates(subset=['Fecha_Local'])
+            if sub_obs.empty:
+                continue
 
-            sub_pp = sub.dropna(subset=['PP', 'PP_Obs'])
-            if len(sub_pp) >= 1:
-                error_pp = sub_pp['PP'] - sub_pp['PP_Obs']
-                mae_pp = round(float(np.mean(np.abs(error_pp))), 2)
-                bias_pp = round(float(np.mean(error_pp)), 2)
-                total_pp_fcst = round(float(sub_pp['PP'].sum()), 1)
-                total_pp_obs = round(float(sub_pp['PP_Obs'].sum()), 1)
-            else:
-                mae_pp, bias_pp, total_pp_fcst, total_pp_obs = "-", "-", "-", "-"
+            # Modelos a evaluar para cada estación
+            modelos_eval = []
 
-            metricas_filas.append({
-                "Punto": pto, "Horas_Evaluadas": len(sub),
-                "MAE_Temp": f"{mae_t} °C", "Sesgo_Temp": f"{bias_t:+0.2f} °C",
-                "MAE_PP": f"{mae_pp} mm/h" if mae_pp != "-" else "-",
-                "Sesgo_PP": f"{bias_pp:+0.2f} mm/h" if bias_pp != "-" else "-",
-                "PP_Acum_WRF": f"{total_pp_fcst} mm" if total_pp_fcst != "-" else "-",
-                "PP_Acum_Real": f"{total_pp_obs} mm" if total_pp_obs != "-" else "-"
-            })
+            # 1. Modelo WRF-SMN
+            sub_wrf = df_wrf_unicos[df_wrf_unicos['Punto'] == pto].copy()
+            if not sub_wrf.empty:
+                cruce_wrf = pd.merge(sub_wrf, sub_obs, on='Fecha_Local', how='inner')
+                modelos_eval.append(("WRF-SMN", cruce_wrf, "T2", "PP"))
 
-    if metricas_filas:
-        df_metricas = pd.DataFrame(metricas_filas)
-        tabla_html = "<table style='width:100%; border-collapse:collapse; margin-top:15px; font-size:14px; text-align:center;'>"
-        tabla_html += "<tr style='background-color:#2b6cb0; color:white;'>"
-        for col in ["Estación", "Horas Muestreadas", "MAE Temp", "Sesgo Temp", "MAE Precipitación", "Sesgo Precipitación", "Lluvia Acum. WRF", "Lluvia Acum. Real"]:
-            tabla_html += f"<th style='padding:10px; border:1px solid #cbd5e0;'>{col}</th>"
-        tabla_html += "</tr>"
-        for _, row in df_metricas.iterrows():
-            tabla_html += "<tr style='background-color:#ffffff;'>"
-            tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0; font-weight:bold;'>{row['Punto']}</td>"
-            tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['Horas_Evaluadas']}</td>"
-            tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['MAE_Temp']}</td>"
-            tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0; color:{'#c53030' if '+' in str(row['Sesgo_Temp']) else '#2b6cb0'}; font-weight:bold;'>{row['Sesgo_Temp']}</td>"
-            tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['MAE_PP']}</td>"
-            tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['Sesgo_PP']}</td>"
-            tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['PP_Acum_WRF']}</td>"
-            tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['PP_Acum_Real']}</td>"
+            # 2 y 3. Modelos ECMWF y GFS
+            if pto in datos_multi_modelo and not datos_multi_modelo[pto].empty:
+                df_mm = datos_multi_modelo[pto].copy()
+                cruce_mm = pd.merge(df_mm, sub_obs, on='Fecha_Local', how='inner')
+                if not cruce_mm.empty:
+                    modelos_eval.append(("ECMWF IFS", cruce_mm, "T2_ECMWF", "PP_ECMWF"))
+                    modelos_eval.append(("GFS (NOAA)", cruce_mm, "T2_GFS", "PP_GFS"))
+
+            # Calcular métricas para cada modelo
+            for nom_mod, df_eval, c_t, c_pp in modelos_eval:
+                sub_t = df_eval.dropna(subset=[c_t, 'T2_Obs'])
+                if len(sub_t) >= 1:
+                    err_t = sub_t[c_t] - sub_t['T2_Obs']
+                    mae_t = round(float(np.mean(np.abs(err_t))), 2)
+                    bias_t = round(float(np.mean(err_t)), 2)
+
+                    sub_pp = df_eval.dropna(subset=[c_pp, 'PP_Obs'])
+                    if len(sub_pp) >= 1:
+                        err_pp = sub_pp[c_pp] - sub_pp['PP_Obs']
+                        mae_pp = round(float(np.mean(np.abs(err_pp))), 2)
+                        bias_pp = round(float(np.mean(err_pp)), 2)
+                        tot_mod = round(float(sub_pp[c_pp].sum()), 1)
+                        tot_obs = round(float(sub_pp['PP_Obs'].sum()), 1)
+                    else:
+                        mae_pp, bias_pp, tot_mod, tot_obs = "-", "-", "-", "-"
+
+                    metricas_filas.append({
+                        "Punto": pto,
+                        "Modelo": nom_mod,
+                        "Horas_Evaluadas": len(sub_t),
+                        "MAE_Temp": f"{mae_t} °C",
+                        "Sesgo_Temp": f"{bias_t:+0.2f} °C",
+                        "MAE_PP": f"{mae_pp} mm/h" if mae_pp != "-" else "-",
+                        "Sesgo_PP": f"{bias_pp:+0.2f} mm/h" if bias_pp != "-" else "-",
+                        "PP_Acum_Mod": f"{tot_mod} mm" if tot_mod != "-" else "-",
+                        "PP_Acum_Real": f"{tot_obs} mm" if tot_obs != "-" else "-"
+                    })
+
+        if metricas_filas:
+            df_metricas = pd.DataFrame(metricas_filas)
+            tabla_html = "<table style='width:100%; border-collapse:collapse; margin-top:15px; font-size:13px; text-align:center;'>"
+            tabla_html += "<tr style='background-color:#1a365d; color:white;'>"
+            for col in ["Estación", "Modelo", "Horas Evaluadas", "MAE Temp", "Sesgo Temp", "MAE Precipitación", "Sesgo Precipitación", "Lluvia Acum. Modelo", "Lluvia Acum. Real"]:
+                tabla_html += f"<th style='padding:9px; border:1px solid #cbd5e0;'>{col}</th>"
             tabla_html += "</tr>"
-        tabla_html += "</table>"
-        html_validacion = f"""
-        <div style='background:#f7fafc; padding:20px; border-radius:8px; border:1px solid #e2e8f0; margin-bottom:40px;'>
-            <p style='margin:0; font-size:14px; color:#4a5568;'>Métricas de desempeño para pronósticos de corto plazo (1 a 24 horas) contrastados con datos de estaciones en superficie:</p>
-            {tabla_html}
-        </div>
-        """
 
+            for _, row in df_metricas.iterrows():
+                # Color distintivo para el modelo
+                col_mod = "#0d47a1" if "WRF" in row['Modelo'] else ("#e65100" if "ECMWF" in row['Modelo'] else "#4a148c")
+                tabla_html += "<tr style='background-color:#ffffff;'>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0; font-weight:bold;'>{row['Punto']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0; font-weight:bold; color:{col_mod};'>{row['Modelo']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['Horas_Evaluadas']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['MAE_Temp']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0; color:{'#c53030' if '+' in str(row['Sesgo_Temp']) else '#2b6cb0'}; font-weight:bold;'>{row['Sesgo_Temp']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['MAE_PP']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0;'>{row['Sesgo_PP']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0; font-weight:bold;'>{row['PP_Acum_Mod']}</td>"
+                tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0; font-weight:bold; color:#2e7d32;'>{row['PP_Acum_Real']}</td>"
+                tabla_html += "</tr>"
+            tabla_html += "</table>"
+
+            html_validacion = f"""
+            <div style='background:#f7fafc; padding:22px; border-radius:8px; border:1px solid #e2e8f0; margin-bottom:40px;'>
+                <p style='margin:0; font-size:14px; color:#2d3748;'>
+                    Métricas de contraste entre los modelos numéricos de pronóstico (plazo 1 a 24 horas) y las estaciones meteorológicas Ambient Weather en superficie:
+                </p>
+                {tabla_html}
+                
+                <div style='margin-top:18px; padding:14px; background:#edf2f7; border-radius:6px; font-size:12px; color:#4a5568; line-height:1.6;'>
+                    <strong>Guía de interpretación de columnas:</strong>
+                    <ul style='margin:6px 0 0 18px; padding:0;'>
+                        <li><strong>Horas Evaluadas:</strong> Horas totales analizadas con registro simultáneo entre modelo y estación.</li>
+                        <li><strong>MAE Temp / MAE Precipitación (Error Absoluto Medio):</strong> Desvío promedio hora a hora sin importar el signo. Cuanto más cercano a cero, mayor es la precisión horaria.</li>
+                        <li><strong>Sesgo Temp / Sesgo Precipitación (Bias):</strong> Tendencia sistemática media. Un valor <em>positivo (+)</em> indica que el modelo sobrestima (predice más calor o más lluvia de lo real); un valor <em>negativo (-)</em> indica que subestima.</li>
+                        <li><strong>Lluvia Acum. Modelo vs. Real:</strong> Volumen total de agua proyectado por el modelo frente al volumen real medido por el pluviómetro en el período evaluado.</li>
+                    </ul>
+                </div>
+            </div>
+            """
+    except Exception as e:
+        print(f"[Error en Validación Multi-Modelo] {e}")
+
+if not html_validacion:
+    html_validacion = """
+    <div style='background:#fffaf0; padding:15px; border-left:4px solid #dd6b20; border-radius:4px; margin-bottom:30px; font-size:14px; color:#7b341e;'>
+        <strong>Acumulando histórico:</strong> El sistema está registrando las corridas horarias. Las métricas multi-modelo aparecerán tras las primeras coincidencias.
+    </div>
+    """
 # ==============================================================================
 # 6. GENERACIÓN DE GRÁFICOS PLOTLY (VENTANA SINCRONIZADA CON HISTÓRICO COMPLETO)
 # ==============================================================================
