@@ -122,16 +122,16 @@ if obs_acumuladas:
     df_total_obs.to_csv(FILE_HIST_OBS, index=False)
 
 # ==============================================================================
-# 3. CONSULTA MULTI-MODELO (ECMWF IFS + GFS VÍA OPEN-METEO API CON 24H PREVIAS)
+# 3. CONSULTA MULTI-MODELO (ECMWF IFS + GFS VÍA OPEN-METEO API)
 # ==============================================================================
-def obtener_multi_modelo(lat, lon, t_inicio, t_fin):
+def obtener_multi_modelo(lat, lon):
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat, "longitude": lon,
         "hourly": ["temperature_2m", "precipitation"],
         "models": ["ecmwf_ifs025", "gfs_seamless"],
         "timezone": ZONA_CHILE,
-        "past_days": 1,        # Incluye las últimas 24 horas de ECMWF y GFS
+        "past_days": 1,        # Trae también las últimas 24 horas
         "forecast_days": 4
     }
     try:
@@ -145,16 +145,18 @@ def obtener_multi_modelo(lat, lon, t_inicio, t_fin):
                 "T2_GFS": h.get("temperature_2m_gfs_seamless"),
                 "PP_GFS": h.get("precipitation_gfs_seamless")
             })
-            # Acotar estrictamente a la ventana común (24h atrás + 72h adelante)
-            df_m = df_m[(df_m["Fecha_Local"] >= t_inicio) & (df_m["Fecha_Local"] <= t_fin)].sort_values("Fecha_Local").reset_index(drop=True)
-            # Calcular acumulado empezando desde 0 en t_inicio
-            df_m["PP_ECMWF_acum"] = df_m["PP_ECMWF"].fillna(0).cumsum().round(2)
-            df_m["PP_GFS_acum"] = df_m["PP_GFS"].fillna(0).cumsum().round(2)
             return df_m
     except Exception as e:
         print(f"[Aviso Multi-modelo] No se pudo consultar Open-Meteo: {e}")
     return pd.DataFrame()
 
+# Descargar ECMWF y GFS para los puntos clave antes de entrar a la validación
+datos_multi_modelo = {}
+for p_nom in ["BT Portillo", "BT Tinguiririca", "Termas del Flaco"]:
+    p_meta = PUNTOS[p_nom]
+    df_mm = obtener_multi_modelo(p_meta["lat"], p_meta["lon"])
+    if not df_mm.empty:
+        datos_multi_modelo[p_nom] = df_mm
 # ==============================================================================
 # 4. EXTRACCIÓN DE PRONÓSTICO DE AWS S3 (WRF-SMN 72 HORAS EN HORA LOCAL)
 # ==============================================================================
@@ -285,11 +287,13 @@ if os.path.exists(FILE_HIST_OBS) and os.path.exists(FILE_HIST_FCST):
             sub_wrf = df_wrf_unicos[df_wrf_unicos['Punto'] == pto].copy()
             if not sub_wrf.empty:
                 cruce_wrf = pd.merge(sub_wrf, sub_obs, on='Fecha_Local', how='inner')
-                modelos_eval.append(("WRF-SMN", cruce_wrf, "T2", "PP"))
+                if not cruce_wrf.empty:
+                    modelos_eval.append(("WRF-SMN", cruce_wrf, "T2", "PP"))
 
             # 2 y 3. Modelos ECMWF y GFS
             if pto in datos_multi_modelo and not datos_multi_modelo[pto].empty:
                 df_mm = datos_multi_modelo[pto].copy()
+                df_mm['Fecha_Local'] = pd.to_datetime(df_mm['Fecha_Local'])
                 cruce_mm = pd.merge(df_mm, sub_obs, on='Fecha_Local', how='inner')
                 if not cruce_mm.empty:
                     modelos_eval.append(("ECMWF IFS", cruce_mm, "T2_ECMWF", "PP_ECMWF"))
@@ -334,7 +338,6 @@ if os.path.exists(FILE_HIST_OBS) and os.path.exists(FILE_HIST_FCST):
             tabla_html += "</tr>"
 
             for _, row in df_metricas.iterrows():
-                # Color distintivo para el modelo
                 col_mod = "#0d47a1" if "WRF" in row['Modelo'] else ("#e65100" if "ECMWF" in row['Modelo'] else "#4a148c")
                 tabla_html += "<tr style='background-color:#ffffff;'>"
                 tabla_html += f"<td style='padding:8px; border:1px solid #e2e8f0; font-weight:bold;'>{row['Punto']}</td>"
