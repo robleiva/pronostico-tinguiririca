@@ -122,15 +122,16 @@ if obs_acumuladas:
     df_total_obs.to_csv(FILE_HIST_OBS, index=False)
 
 # ==============================================================================
-# 3. CONSULTA MULTI-MODELO (ECMWF IFS + GFS VÍA OPEN-METEO API)
+# 3. CONSULTA MULTI-MODELO (ECMWF IFS + GFS VÍA OPEN-METEO API CON 24H PREVIAS)
 # ==============================================================================
-def obtener_multi_modelo(lat, lon):
+def obtener_multi_modelo(lat, lon, t_inicio, t_fin):
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat, "longitude": lon,
         "hourly": ["temperature_2m", "precipitation"],
         "models": ["ecmwf_ifs025", "gfs_seamless"],
         "timezone": ZONA_CHILE,
+        "past_days": 1,        # Incluye las últimas 24 horas de ECMWF y GFS
         "forecast_days": 4
     }
     try:
@@ -144,20 +145,15 @@ def obtener_multi_modelo(lat, lon):
                 "T2_GFS": h.get("temperature_2m_gfs_seamless"),
                 "PP_GFS": h.get("precipitation_gfs_seamless")
             })
-            df_m["PP_ECMWF_acum"] = df_m["PP_ECMWF"].cumsum()
-            df_m["PP_GFS_acum"] = df_m["PP_GFS"].cumsum()
+            # Acotar estrictamente a la ventana común (24h atrás + 72h adelante)
+            df_m = df_m[(df_m["Fecha_Local"] >= t_inicio) & (df_m["Fecha_Local"] <= t_fin)].sort_values("Fecha_Local").reset_index(drop=True)
+            # Calcular acumulado empezando desde 0 en t_inicio
+            df_m["PP_ECMWF_acum"] = df_m["PP_ECMWF"].fillna(0).cumsum().round(2)
+            df_m["PP_GFS_acum"] = df_m["PP_GFS"].fillna(0).cumsum().round(2)
             return df_m
     except Exception as e:
         print(f"[Aviso Multi-modelo] No se pudo consultar Open-Meteo: {e}")
     return pd.DataFrame()
-
-# Descargar ECMWF y GFS para los puntos clave
-datos_multi_modelo = {}
-for p_nom in ["BT Portillo", "BT Tinguiririca", "Termas del Flaco"]:
-    p_meta = PUNTOS[p_nom]
-    df_mm = obtener_multi_modelo(p_meta["lat"], p_meta["lon"])
-    if not df_mm.empty:
-        datos_multi_modelo[p_nom] = df_mm
 
 # ==============================================================================
 # 4. EXTRACCIÓN DE PRONÓSTICO DE AWS S3 (WRF-SMN 72 HORAS EN HORA LOCAL)
@@ -329,10 +325,15 @@ if os.path.exists(FILE_HIST_OBS) and os.path.exists(FILE_HIST_FCST):
         """
 
 # ==============================================================================
-# 6. GENERACIÓN DE GRÁFICOS PLOTLY (HIPSOMETRÍA NIEVE/AGUA + EMPALME WRF)
+# 6. GENERACIÓN DE GRÁFICOS PLOTLY (VENTANA SINCRONIZADA 24H + 72H)
 # ==============================================================================
 
-# Cargar histórico de pronósticos WRF para empalmar horas pasadas en los gráficos
+# Definir la ventana temporal uniforme (24h atrás hasta 72h adelante)
+t_corte_actual = df["Fecha_Local"].min()  # Inicio de la corrida actual WRF
+t_inicio_comun = t_corte_actual - datetime.timedelta(hours=24)
+t_fin_comun = t_corte_actual + datetime.timedelta(hours=72)
+
+# Cargar histórico de pronósticos WRF para completar las 24h pasadas
 df_h_wrf_prev = pd.DataFrame()
 if os.path.exists(FILE_HIST_FCST):
     try:
@@ -341,7 +342,15 @@ if os.path.exists(FILE_HIST_FCST):
             df_h_wrf_prev.rename(columns={"Fecha_Validez": "Fecha_Local"}, inplace=True)
         df_h_wrf_prev['Fecha_Local'] = pd.to_datetime(df_h_wrf_prev['Fecha_Local'])
     except Exception as e:
-        print(f"[Aviso] No se pudo leer histórico previo para empalme: {e}")
+        print(f"[Aviso] Lectura histórico previo: {e}")
+
+# Descargar ECMWF y GFS sincronizados con la ventana común
+datos_multi_modelo = {}
+for p_nom in ["BT Portillo", "BT Tinguiririca", "Termas del Flaco"]:
+    p_meta = PUNTOS[p_nom]
+    df_mm = obtener_multi_modelo(p_meta["lat"], p_meta["lon"], t_inicio_comun, t_fin_comun)
+    if not df_mm.empty:
+        datos_multi_modelo[p_nom] = df_mm
 
 # A. Gráfico Hipsométrico e Isoterma Dinámica (Lluvia Líquida vs. Nieve)
 df_flaco = df[df["Punto"] == "Termas del Flaco"].copy()
@@ -378,8 +387,7 @@ for i, (nombre_p, meta) in enumerate(list(PUNTOS.items())[:5]):
         row=1, col=1
     )
 
-# Panel 2: Distribución Nieve vs. Lluvia Líquida
-# Capa 1: Lluvia líquida (desde cota mínima hasta isoterma)
+# Panel 2: Distribución Hipsométrica (Nieve vs. Lluvia Líquida)
 fig_iso.add_trace(go.Scatter(
     x=df_flaco["Fecha_Local"], y=df_flaco["Area_Pluvial_km2"],
     mode='lines', line=dict(color='#00acc1', width=2),
@@ -387,7 +395,6 @@ fig_iso.add_trace(go.Scatter(
     name='Área con Lluvia Líquida (Escorrentía)'
 ), row=2, col=1, secondary_y=False)
 
-# Capa 2: Nieve acumulada en cordillera (desde la isoterma hasta los 1.109,3 km²)
 area_total_vec = [1109.29] * len(df_flaco)
 fig_iso.add_trace(go.Scatter(
     x=df_flaco["Fecha_Local"], y=area_total_vec,
@@ -396,7 +403,6 @@ fig_iso.add_trace(go.Scatter(
     name='Área con Nieve Sólida (Retención Nival)'
 ), row=2, col=1, secondary_y=False)
 
-# Línea del porcentaje activo sobre eje secundario
 fig_iso.add_trace(go.Scatter(
     x=df_flaco["Fecha_Local"], y=df_flaco["Pct_Pluvial"],
     mode='lines', line=dict(color='#004d40', width=2.5, dash='dash'),
@@ -408,7 +414,7 @@ fig_iso.update_layout(
     margin=dict(l=65, r=50, t=50, b=40)
 )
 fig_iso.update_yaxes(title_text="Altitud (m)", row=1, col=1)
-fig_iso.update_yaxes(title_text="Superficie de Cuenca (km²)", range=[0, 1150], row=2, col=1, secondary_y=False)
+fig_iso.update_yaxes(title_text="Superficie Cuenca (km²)", range=[0, 1150], row=2, col=1, secondary_y=False)
 fig_iso.update_yaxes(
     title_text="% Cuenca Líquida",
     range=[0, 100],
@@ -422,25 +428,24 @@ fig_iso.update_xaxes(title_text="Fecha y Hora (Hora Local de Chile)", row=2, col
 
 html_isoterma = f"<div style='margin-bottom: 45px;'>{fig_iso.to_html(full_html=False, include_plotlyjs='cdn')}</div>"
 
-# B. Gráficos Detallados por Estación (con Empalme Histórico WRF)
+# B. Gráficos Detallados por Estación (Sincronización Total 24h Pasadas + 72h Futuras)
 html_puntos = ""
 for punto in PUNTOS.keys():
     df_p = df[df["Punto"] == punto].copy()
     if df_p.empty:
         continue
 
-    # Empalmar con corridas anteriores del WRF si existen en el histórico
+    # Empalmar las últimas 24h del WRF desde el histórico
     if not df_h_wrf_prev.empty:
         sub_h = df_h_wrf_prev[df_h_wrf_prev['Punto'] == punto].copy()
-        # Tomar registros anteriores a la corrida actual
-        sub_h = sub_h[sub_h['Fecha_Local'] < df_p['Fecha_Local'].min()]
+        sub_h = sub_h[(sub_h['Fecha_Local'] >= t_inicio_comun) & (sub_h['Fecha_Local'] < t_corte_actual)]
         if not sub_h.empty:
             sub_h = sub_h.sort_values('Lead_Time').drop_duplicates(subset=['Fecha_Local'], keep='first')
             cols_unir = [c for c in ['Fecha_Local', 'T2', 'PP'] if c in sub_h.columns]
-            df_p = pd.concat([sub_h[cols_unir], df_p], ignore_index=True).sort_values('Fecha_Local').reset_index(drop=True)
+            df_p = pd.concat([sub_h[cols_unir], df_p], ignore_index=True)
 
-    # Calcular acumulado completo continuo
-    df_p["PP_acum"] = df_p["PP"].cumsum()
+    df_p = df_p[(df_p["Fecha_Local"] >= t_inicio_comun) & (df_p["Fecha_Local"] <= t_fin_comun)].sort_values('Fecha_Local').reset_index(drop=True)
+    df_p["PP_acum"] = df_p["PP"].fillna(0).cumsum().round(2)
 
     subtitulos = (
         f"<b>Temperatura (°C) - {punto} ({PUNTOS[punto]['alt']} m s. n. m.)</b>",
@@ -472,10 +477,12 @@ for punto in PUNTOS.keys():
 
     if punto in datos_observados and not datos_observados[punto].empty:
         df_o = datos_observados[punto]
-        fig.add_trace(
-            go.Scatter(x=df_o["Fecha_Local"], y=df_o["T2_Obs"], name="Temp Real (Estación)",
-                       line=dict(color="#2ca02c", width=2.5)), row=1, col=1
-        )
+        df_o_win = df_o[(df_o["Fecha_Local"] >= t_inicio_comun) & (df_o["Fecha_Local"] <= t_fin_comun)].copy()
+        if not df_o_win.empty:
+            fig.add_trace(
+                go.Scatter(x=df_o_win["Fecha_Local"], y=df_o_win["T2_Obs"], name="Temp Real (Estación)",
+                           line=dict(color="#2ca02c", width=2.5)), row=1, col=1
+            )
 
     fig.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="0°C", row=1, col=1)
 
@@ -502,14 +509,27 @@ for punto in PUNTOS.keys():
 
     if punto in datos_observados and not datos_observados[punto].empty:
         df_o = datos_observados[punto]
-        fig.add_trace(
-            go.Bar(x=df_o["Fecha_Local"], y=df_o["PP_Obs"], name="PP Real Estación (mm/h)",
-                   marker_color="#2ca02c", opacity=0.65), row=2, col=1, secondary_y=False
-        )
-        fig.add_trace(
-            go.Scatter(x=df_o["Fecha_Local"], y=df_o["PP_Obs_acum"], name="Acum. Real Estación (mm)",
-                       line=dict(color="#006400", width=2.5)), row=2, col=1, secondary_y=True
-        )
+        df_o_win = df_o[(df_o["Fecha_Local"] >= t_inicio_comun) & (df_o["Fecha_Local"] <= t_fin_comun)].copy().sort_values("Fecha_Local").reset_index(drop=True)
+        if not df_o_win.empty:
+            df_o_win["PP_Obs_acum_win"] = df_o_win["PP_Obs"].fillna(0).cumsum().round(2)
+            fig.add_trace(
+                go.Bar(x=df_o_win["Fecha_Local"], y=df_o_win["PP_Obs"], name="PP Real Estación (mm/h)",
+                       marker_color="#2ca02c", opacity=0.65), row=2, col=1, secondary_y=False
+            )
+            fig.add_trace(
+                go.Scatter(x=df_o_win["Fecha_Local"], y=df_o_win["PP_Obs_acum_win"], name="Acum. Real Estación (mm)",
+                           line=dict(color="#006400", width=2.5)), row=2, col=1, secondary_y=True
+            )
+
+    # Línea vertical divisoria entre las 24h pasadas y las 72h de pronóstico
+    fig.add_vline(
+        x=t_corte_actual, line_width=1.5, line_dash="dash", line_color="#718096",
+        annotation_text="Inicio Pronóstico", annotation_position="top left", row=1, col=1
+    )
+    fig.add_vline(
+        x=t_corte_actual, line_width=1.5, line_dash="dash", line_color="#718096",
+        annotation_text="Inicio Pronóstico", annotation_position="top left", row=2, col=1
+    )
 
     layout_update = dict(
         height=680, hovermode="x unified", template="plotly_white",
@@ -537,7 +557,6 @@ for punto in PUNTOS.keys():
     fig.update_yaxes(title_text="Acumulada (mm)", row=2, col=1, secondary_y=True)
 
     html_puntos += f"<div style='margin-bottom: 50px;'>{fig.to_html(full_html=False, include_plotlyjs=False)}</div>"
-
 # ==============================================================================
 # 7. ENSAMBLAJE HTML COMPLETO
 # ==============================================================================
