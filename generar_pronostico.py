@@ -124,18 +124,34 @@ if obs_acumuladas:
 # ==============================================================================
 # 3. CONSULTA MULTI-MODELO (ECMWF IFS + GFS VÍA OPEN-METEO API)
 # ==============================================================================
-def obtener_multi_modelo(lat, lon):
+def obtener_multi_modelo(lat, lon, t_inicio=None, t_fin=None):
+    """
+    Consulta los modelos ECMWF IFS y GFS en Open-Meteo.
+    Acepta de 2 a 4 parámetros para total compatibilidad.
+    """
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
-        "latitude": lat, "longitude": lon,
+        "latitude": lat,
+        "longitude": lon,
         "hourly": ["temperature_2m", "precipitation"],
         "models": ["ecmwf_ifs025", "gfs_seamless"],
         "timezone": ZONA_CHILE,
-        "past_days": 1,        # Trae también las últimas 24 horas
+        "past_days": 2,        # Descarga los 2 días previos para empalmar con la estación
         "forecast_days": 4
     }
+
+    # Si se especificaron fechas de inicio y fin, se pueden agregar al query
+    if t_inicio is not None and t_fin is not None:
+        try:
+            params["start_date"] = pd.to_datetime(t_inicio).strftime("%Y-%m-%d")
+            params["end_date"] = pd.to_datetime(t_fin).strftime("%Y-%m-%d")
+            params.pop("past_days", None)
+            params.pop("forecast_days", None)
+        except Exception:
+            pass
+
     try:
-        r = requests.get(url, params=params, timeout=12)
+        r = requests.get(url, params=params, timeout=15)
         if r.status_code == 200:
             h = r.json().get("hourly", {})
             df_m = pd.DataFrame({
@@ -145,18 +161,22 @@ def obtener_multi_modelo(lat, lon):
                 "T2_GFS": h.get("temperature_2m_gfs_seamless"),
                 "PP_GFS": h.get("precipitation_gfs_seamless")
             })
-            return df_m
-    except Exception as e:
-        print(f"[Aviso Multi-modelo] No se pudo consultar Open-Meteo: {e}")
-    return pd.DataFrame()
+            
+            # Si se pasaron límites temporales, filtrar el dataframe resultante
+            if t_inicio is not None:
+                df_m = df_m[df_m["Fecha_Local"] >= pd.to_datetime(t_inicio)]
+            if t_fin is not None:
+                df_m = df_m[df_m["Fecha_Local"] <= pd.to_datetime(t_fin)]
 
-# Descargar ECMWF y GFS para los puntos clave antes de entrar a la validación
-datos_multi_modelo = {}
-for p_nom in ["BT Portillo", "BT Tinguiririca", "Termas del Flaco"]:
-    p_meta = PUNTOS[p_nom]
-    df_mm = obtener_multi_modelo(p_meta["lat"], p_meta["lon"])
-    if not df_mm.empty:
-        datos_multi_modelo[p_nom] = df_mm
+            df_m = df_m.sort_values("Fecha_Local").reset_index(drop=True)
+            df_m["PP_ECMWF_acum"] = df_m["PP_ECMWF"].cumsum()
+            df_m["PP_GFS_acum"] = df_m["PP_GFS"].cumsum()
+            return df_m
+        else:
+            print(f"[Aviso Multi-modelo] Open-Meteo respondió código {r.status_code}")
+    except Exception as e:
+        print(f"[Aviso Multi-modelo] Excepción al consultar Open-Meteo: {e}")
+    return pd.DataFrame()
 # ==============================================================================
 # 4. EXTRACCIÓN DE PRONÓSTICO DE AWS S3 (WRF-SMN 72 HORAS EN HORA LOCAL)
 # ==============================================================================
